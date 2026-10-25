@@ -1,90 +1,89 @@
 # ForgeFlow roadmap
 
-**Status:** draft / design-phase plan — scope and priorities may change.
+**Status:** agreed design direction; implementation not started.  
+**Last reviewed:** 2026-10-24.
 
-This roadmap describes outcomes, not promises of implemented functionality. ForgeFlow has no released factory runtime yet. Each phase should end with a demonstrable, reviewable checkpoint.
+The first complete implementation target is **[MVP v0.1](mvp-scope.md)**. Work should proceed in small reviewable PRs and demonstrate real behavior, not merely produce agent-written design claims.
 
 ## Phase 0 — Project foundation (current)
 
-**Goal:** create a trustworthy public repository that explains the product and its boundaries.
+**Goal:** establish a credible, public, MIT-licensed project and its design boundaries.
 
 - [x] Public GitHub repository and MIT license
-- [x] Project introduction and explicit pre-alpha status
-- [x] Third-party inspiration and licensing inventory
-- [x] Initial architecture and GitHub/local-state decision
-- [ ] Review and merge these project-foundation documents
-- [ ] Define GitHub contribution/branch protection defaults
-- [ ] Decide minimum initial GitHub Projects board and fields
+- [x] Initial README and upstream attribution/license inventory
+- [x] ADR 0001: GitHub Projects for approved work, local runtime state for execution
+- [x] ADR 0002: optional, scoped knowledge sources and Obsidian integration
+- [x] Explicit MVP v0.1 scope and acceptance tests
+- [ ] Review and merge the foundation documentation PR
+- [ ] Choose and configure a minimal GitHub Project for ForgeFlow development
+- [ ] Review branch protection / repository contribution defaults
 
-**Exit criteria:** design and licensing boundaries are readable to an independent contributor; no claims of functionality that does not exist.
+**Exit:** docs are merged, project workflow exists, no false claim that software is already available.
 
-## Phase 1 — Minimal end-to-end vertical slice
+## Phase 1 — MVP v0.1 (first complete implementation assignment)
 
-**Goal:** prove the workflow with one disposable test repository before scaling.
+**Goal:** a single job safely moves from an idea to an owner-approved Pull Request, with optional reusable knowledge context. Build in **five small checkpoints** rather than one giant all-or-nothing change.
 
-- [ ] Verify Claude Code, Codex CLI, plugin, and host capabilities (including Windows)
-- [ ] Define and test the durable job contract and minimal local state transitions
-- [ ] Implement a minimal supported command entry point, with syntax confirmed on actual hosts
-- [ ] Accept an explicitly approved, small Issue/task
-- [ ] Run one builder in an isolated worktree
-- [ ] Execute required tests/checks
-- [ ] Produce a reviewable draft Pull Request and evidence
-- [ ] Require human approval for merge
-- [ ] Demonstrate interrupted-job recovery
+### Checkpoint A — Environment and execution harness
 
-**Exit criteria:** one small task completes to a human-reviewed PR with a replayable audit trail; no automatic merge, no secrets leakage.
+- [ ] Verify Claude Code, Codex CLI, Git, GitHub CLI, Windows, available skills and MCP without installing dependencies silently
+- [ ] Confirm real `/forge` / `$forge` invocation mechanics or document a supported fallback
+- [ ] Implement minimal durable job state, one-job locking, isolated worktree and non-destructive resume
+- [ ] Configure/link a GitHub Project and define ID traceability
 
-## Phase 2 — Product discovery and engineering design
+### Checkpoint B — Discovery and plan approval
 
-**Goal:** make ForgeFlow helpful *before* coding begins.
+- [ ] Interactive idea exploration, product scope and architecture documentation
+- [ ] Reuse available Anthropic Product Management and Engineering skills where proven accessible
+- [ ] Gate A: human plan approval before issue dispatch or writing code
+- [ ] Convert approved plan into verifiable GitHub Issue/Project item
 
-- [ ] Integrate installed Product Management / Engineering skills when genuinely available
-- [ ] Persist discovery, product scope, ADRs and acceptance criteria in approved formats
-- [ ] Add explicit human plan-approval boundary
-- [ ] Convert approved plans to GitHub Issues and Project Ready work
-- [ ] Handle changed requirements without silent re-approval
+### Checkpoint C — Build, QA, independent review and PR
 
-**Exit criteria:** a human can debate alternatives, approve a design, and create a traceable implementation job without auto-dispatch.
+- [ ] Select Claude Code or Codex CLI as the sole writable builder
+- [ ] Run project-specific deterministic checks and a focused review, optionally by the other provider
+- [ ] Limit repair rounds, keep evidence and escalate unresolved risks
+- [ ] Produce a draft PR; Gate B requires owner approval for merge
+- [ ] Prove interrupted-job recovery without duplicate workers or lost changes
 
-## Phase 3 — Multi-model implementation and review
+### Checkpoint D — Optional Knowledge Management
 
-**Goal:** allow Claude Code and Codex CLI to fulfill distinct, safe roles.
+- [ ] One project-to-Markdown-root association; read/list/text-search with attribution
+- [ ] Propose a documentation edit as a diff; perform a scoped, conflict-checked, recoverable write only after explicit authorization
+- [ ] Validate read-only access through an **existing** `mcp-obsidian` integration in the test vault, without altering client global MCP configurations
+- [ ] Confirm the factory works without Obsidian or MCP
+- [ ] Account for unrestricted global MCP exposure as an explicit security limitation rather than claiming permissions are enforced
 
-- [ ] Provider adapters and configurable model routing
-- [ ] Single-writer worktree permissions and crash-safe recovery
-- [ ] Optional independent cross-provider review
-- [ ] Deterministic checks before relevant AI review
-- [ ] Bounded corrective iterations and human escalation
-- [ ] Evidence-rich PR summaries and usage estimates
+### Checkpoint E — Verify the complete vertical slice
 
-**Exit criteria:** demonstrate both provider directions on representative changes and handle one unavailable-provider scenario without losing state or bypassing gates.
+- [ ] Run all 12 acceptance scenarios in [MVP scope](mvp-scope.md) in a disposable repository and vault
+- [ ] Verify both provider invocation paths where installed; record unsupported combinations honestly
+- [ ] Review code, documentation, operational logs, recoverability and secret handling
+- [ ] Ship only after human-reviewed PRs and honest release notes
 
-## Phase 4 — Observability and learning
+**Exit:** observed, repeatable evidence for the MVP criteria; no automatic merge/deploy and no unapproved vault modifications.
 
-**Goal:** turn verified delivery history into actionable, reviewable improvements.
+## Phase 2 — Operational polish (after v0.1)
 
-- [ ] Summarize runs, statuses, retries, durations, and available token usage locally
-- [ ] Gather recurring defects or review findings without automatically creating noise
-- [ ] Propose improvement changes with evidence and a regression check
-- [ ] Require human review before modifying factory skills/policies
-- [ ] Evaluate whether a small local diagnostic dashboard is justified
+**Goal:** learn from real runs before adding orchestration complexity.
 
-**Exit criteria:** a recurrent failure leads to a reviewable preventive test or process change; the system never silently rewrites shared instructions.
+- [ ] Improve model/provider routing based on practical usage
+- [ ] Add safe, evidence-backed learning proposals (no autonomous skill rewrites)
+- [ ] Add richer costs/tokens visibility where providers expose data
+- [ ] Reassess whether a small local observability dashboard is needed
+- [ ] Consider a native Obsidian MCP adapter and multi-vault support
+- [ ] Refine GitHub Project automation, retries and CI feedback
 
-## Phase 5 — Real-world pilot and release hardening
+## Phase 3 — Pilot and open-source hardening
 
-**Goal:** prove value on a bounded non-production feature of a real project.
+- [ ] Trial one bounded, approved non-production feature of a real project such as Weather Station
+- [ ] Measure human time, task duration, token/cost estimates, retries and defects
+- [ ] Validate installation/update/uninstall paths on Windows and other declared hosts
+- [ ] Re-check third-party attributions and licenses at actual versions used
+- [ ] Document compatibility, troubleshooting, threat boundaries and contribution workflow
 
-- [ ] Execute one approved feature on a project such as Weather Station
-- [ ] Measure human effort, cycle time, retries, defects, and inference usage
-- [ ] Document installer behavior, dependency checks, security boundaries, Windows compatibility, troubleshooting, and rollback
-- [ ] Validate license and attribution notices for actual vendored code and assets
-- [ ] Produce an honest compatibility matrix and release notes
+## Explicitly deferred beyond the first MVP
 
-**Exit criteria:** other developers can reproduce the documented installation and pilot scenario using the declared requirements.
+Do not start with a local Kanban clone, distributed multi-agent swarms, unlimited parallel coding, unattended deployment, production DB modification, a vector database, cross-machine Obsidian synchronization, recursive self-modification, or a custom MCP server.
 
-## Scope discipline
-
-Not goals for the first milestone: a bespoke Kanban UI, unlimited agent swarms, autonomous production deployment, recursive self-editing, generalized project analytics, or universal support for every programming language and host.
-
-See [architecture.md](architecture.md) for unresolved questions and [ADR 0001](decisions/0001-github-projects-local-state.md) for the agreed work/state ownership.
+See [architecture](architecture.md), [MVP v0.1](mvp-scope.md) and the [ADR index](decisions/0001-github-projects-local-state.md) for current boundaries.
