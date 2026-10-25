@@ -44,6 +44,7 @@ Idea -> Discover -> Design -> HUMAN APPROVES PLAN
 - **One source of truth per concern:** no second Kanban board or duplicated authoritative task state.
 - **Risk-proportional verification:** deterministic checks first, then relevant review; no unnecessary parallel-agent swarms.
 - **Safe self-improvement:** collect evidence and propose tested process improvements; do not silently rewrite installed skills or security policies.
+- **Optional Knowledge Management:** access project-scoped Markdown and optionally existing Obsidian MCP; keep user-owned vaults independent and require authorization for changes.
 
 ## Intended interfaces (not implemented)
 
@@ -55,10 +56,12 @@ Potential operations include exploring ideas, designing solutions, approving pla
 
 - [Architecture and current design boundaries](docs/architecture.md)
 - [ADR 0001 — GitHub Projects and local execution state](docs/decisions/0001-github-projects-local-state.md)
+- [ADR 0002 — Optional knowledge sources and Obsidian](docs/decisions/0002-knowledge-sources-obsidian.md)
+- [MVP v0.1 scope and acceptance criteria](docs/mvp-scope.md)
 - [Development roadmap](docs/roadmap.md)
 - [Third-party references and attribution](ATTRIBUTION.md)
 
-The first milestone is to prove a small, auditable workflow in a **disposable test repository**. Only after that should ForgeFlow be trialed on an actual project.
+The first implementation target is [MVP v0.1](docs/mvp-scope.md): a bounded, auditable idea-to-human-reviewed-PR workflow, plus optional project-scoped Markdown knowledge access. It must be built and verified through small checkpoints in a **disposable test repository and vault**. The user's working Obsidian MCP setup is an existing external tool, not a bundled ForgeFlow integration. Only after testing should ForgeFlow be trialed on an actual project.
 
 ## Privacy and safety
 
