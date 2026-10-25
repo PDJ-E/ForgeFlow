@@ -16,8 +16,15 @@ from typing import Any
 from forgeflow.errors import ValidationError
 from forgeflow.proc import redact_credentials
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+# Version 1 (Checkpoint A) records load unchanged: every field added in 2 is optional.
+READABLE_SCHEMA_VERSIONS = frozenset({1, 2})
 DEFAULT_MAX_REWORK = 2
+# Builder of a job created by discovery. No provider has this name, so no builder lease can be
+# taken until Checkpoint C assigns a real one.
+UNASSIGNED_PROVIDER = "unassigned"
+# The only way a plan approval is captured (forgeflow.approval). Anything else is refused.
+HUMAN_APPROVAL_METHOD = "interactive-console"
 
 # Job IDs become directory and branch names, so the format is strict: no separators, no "..".
 JOB_ID_PATTERN = re.compile(r"^ff-\d{8}-[0-9a-f]{6}$")
@@ -45,7 +52,8 @@ S = JobState
 TRANSITIONS: dict[JobState, frozenset[JobState]] = {
     S.DRAFT: frozenset({S.AWAITING_PLAN_APPROVAL, S.CANCELLED}),
     S.AWAITING_PLAN_APPROVAL: frozenset({S.PLAN_APPROVED, S.DRAFT, S.CANCELLED}),
-    S.PLAN_APPROVED: frozenset({S.READY, S.CANCELLED}),
+    # PLAN_APPROVED -> DRAFT revokes the approval to revise the plan; only before handoff.
+    S.PLAN_APPROVED: frozenset({S.READY, S.DRAFT, S.CANCELLED}),
     S.READY: frozenset({S.BUILDING, S.CANCELLED}),
     S.BUILDING: frozenset({S.VERIFYING, S.INTERRUPTED, S.NEEDS_HUMAN}),
     S.VERIFYING: frozenset({S.REVIEWING, S.BUILDING, S.INTERRUPTED, S.NEEDS_HUMAN}),
@@ -168,8 +176,9 @@ class Approval:
     approver: str
     approved_at: str
     subject_sha256: str  # hash of exactly what was approved (the plan file for Gate A)
-    method: str  # how the decision was captured, e.g. "interactive-cli" or "test-fixture"
+    method: str  # how the decision was captured; plan approvals use HUMAN_APPROVAL_METHOD
     note: str = ""
+    subject_version: int | None = None  # the plan version (submission number) approved
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -179,6 +188,7 @@ class Approval:
             "subject_sha256": self.subject_sha256,
             "method": self.method,
             "note": self.note,
+            "subject_version": self.subject_version,
         }
 
     @classmethod
@@ -199,6 +209,7 @@ class Approval:
             subject_sha256=digest,
             method=_get(d, "method", str, where),
             note=_get(d, "note", str, where, optional=True) or "",
+            subject_version=_get(d, "subject_version", int, where, optional=True),
         )
 
 
@@ -207,12 +218,16 @@ class Plan:
     path: str | None = None  # repository-relative path of the approved plan document
     sha256: str | None = None  # hash recorded when the plan was submitted for approval
     approval: Approval | None = None
+    version: int = 0  # number of submissions so far; kept when a revision clears the rest
+    submitted_at: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "path": self.path,
             "sha256": self.sha256,
             "approval": self.approval.to_dict() if self.approval else None,
+            "version": self.version,
+            "submitted_at": self.submitted_at,
         }
 
     @classmethod
@@ -225,6 +240,10 @@ class Plan:
             path=_get(d, "path", str, where, optional=True),
             sha256=digest,
             approval=Approval.from_dict(approval, f"{where}.approval") if approval else None,
+            version=_non_negative(
+                _get(d, "version", int, where, optional=True) or 0, f"{where}.version"
+            ),
+            submitted_at=_get(d, "submitted_at", str, where, optional=True),
         )
 
 
@@ -359,12 +378,55 @@ class PullRequestLink:
 
 
 @dataclass
+class Handoff:
+    """Progress of publishing an approved plan to GitHub (forgeflow.handoff). Resumable."""
+
+    plan_sha256: str  # the approved plan this handoff publishes
+    mode: str  # "create" (new issue) or "link" (existing issue)
+    marker: str  # hidden trace marker written to GitHub; finds the issue again after a crash
+    started_at: str
+    completed_at: str | None = None
+    project_url: str | None = None
+    status: str | None = None  # Project Status option set on the item
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "plan_sha256": self.plan_sha256,
+            "mode": self.mode,
+            "marker": self.marker,
+            "started_at": self.started_at,
+            "completed_at": self.completed_at,
+            "project_url": self.project_url,
+            "status": self.status,
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any], where: str) -> Handoff:
+        digest = _get(d, "plan_sha256", str, where)
+        if not _SHA256.match(digest):
+            raise ValidationError(f"{where}.plan_sha256 is not a sha256 hex digest")
+        mode = _get(d, "mode", str, where)
+        if mode not in ("create", "link"):
+            raise ValidationError(f"{where}.mode must be 'create' or 'link'")
+        return cls(
+            plan_sha256=digest,
+            mode=mode,
+            marker=_get(d, "marker", str, where),
+            started_at=_get(d, "started_at", str, where),
+            completed_at=_get(d, "completed_at", str, where, optional=True),
+            project_url=_get(d, "project_url", str, where, optional=True),
+            status=_get(d, "status", str, where, optional=True),
+        )
+
+
+@dataclass
 class GitHubLinks:
     issue: IssueLink | None = None
     project_items: list[ProjectItemLink] = field(default_factory=list)
     # "ok", "not-checked", or "blocked: <reason>" - a missing Project link is never silent.
     project_lookup: str = "not-checked"
     pull_request: PullRequestLink | None = None
+    handoff: Handoff | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -372,12 +434,14 @@ class GitHubLinks:
             "project_items": [p.to_dict() for p in self.project_items],
             "project_lookup": self.project_lookup,
             "pull_request": self.pull_request.to_dict() if self.pull_request else None,
+            "handoff": self.handoff.to_dict() if self.handoff else None,
         }
 
     @classmethod
     def from_dict(cls, d: dict[str, Any], where: str = "github") -> GitHubLinks:
         issue = _obj(d, "issue", where, optional=True)
         pr = _obj(d, "pull_request", where, optional=True)
+        handoff = _obj(d, "handoff", where, optional=True)
         items = _get(d, "project_items", list, where, optional=True) or []
         parsed_items = []
         for i, item in enumerate(items):
@@ -389,6 +453,7 @@ class GitHubLinks:
             project_items=parsed_items,
             project_lookup=_get(d, "project_lookup", str, where, optional=True) or "not-checked",
             pull_request=PullRequestLink.from_dict(pr, f"{where}.pull_request") if pr else None,
+            handoff=Handoff.from_dict(handoff, f"{where}.handoff") if handoff else None,
         )
 
 
@@ -559,7 +624,7 @@ class Job:
         if not isinstance(d, dict):
             raise ValidationError("job record must be a JSON object")
         version = _get(d, "schema_version", int, "job")
-        if version != SCHEMA_VERSION:
+        if version not in READABLE_SCHEMA_VERSIONS:
             raise ValidationError(f"unsupported job schema_version {version}")
         state = _parse_state(_get(d, "state", str, "job"), "job.state")
         interrupted_raw = _get(d, "interrupted_from", str, "job", optional=True)

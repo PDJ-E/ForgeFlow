@@ -14,7 +14,7 @@ from forgeflow.errors import (
     ValidationError,
 )
 from forgeflow.github import GitHubClient
-from forgeflow.jobs import Approval, Job, JobState, utc_now
+from forgeflow.jobs import HUMAN_APPROVAL_METHOD, Approval, Job, JobState, utc_now
 from forgeflow.store import JobStore
 from tests.support import FakeGitHub, GitRepoTestCase, pull_request, run_git
 
@@ -72,22 +72,31 @@ class GateATests(GitRepoTestCase):
             approver="owner",
             approved_at=utc_now(),
             subject_sha256="0" * 64,
-            method="test-fixture",
+            method=HUMAN_APPROVAL_METHOD,
+            subject_version=job.plan.version,
         )
         with self.assertRaises(InvalidTransitionError):
-            self.store.transition(job.job_id, S.PLAN_APPROVED, approval=wrong)
+            self.store._record_plan_approval(job.job_id, wrong, expected_revision=job.revision)
 
     def test_plan_edited_after_submission_cannot_be_approved(self) -> None:
         job = self.store.submit_plan(self.new_job().job_id, "docs/plan.md")
         (self.repo / "docs" / "plan.md").write_text(
             "# Plan\n\nAlso delete prod.\n", encoding="utf-8"
         )
+        with self.assertRaisesRegex(InvalidTransitionError, "changed after version 1"):
+            self.approve(job.job_id)
         with self.assertRaises(InvalidTransitionError):
-            self.store.transition(job.job_id, S.PLAN_APPROVED, approval=self.approval_for(job))
+            self.store._record_plan_approval(
+                job.job_id, self.approval_for(job), expected_revision=job.revision
+            )
+        self.assertEqual(self.store.load(job.job_id).state, S.AWAITING_PLAN_APPROVAL)
 
     def test_approval_is_recorded_in_job_and_event_log(self) -> None:
         job = self.approved_job()
-        self.assertEqual(job.plan.approval.approver, "test-owner")  # type: ignore[union-attr]
+        approval = job.plan.approval
+        assert approval is not None
+        self.assertEqual(approval.method, HUMAN_APPROVAL_METHOD)
+        self.assertEqual(approval.subject_version, 1)
         events = self.store.events(job.job_id)
         self.assertEqual(events[-1]["details"]["approval"]["gate"], "plan")
 

@@ -136,7 +136,7 @@ class CliTests(GitRepoTestCase):
         self.assertEqual(code, 0)
         self.assertRegex(out, rf"{job.job_id}\s+ready\s+mock\s+#7")
         code, out, _ = self.run_cli("status", job.job_id)
-        self.assertIn("plan approval  test-owner", out)
+        self.assertRegex(out, r"plan approval  v1 by .+ via interactive-console")
         self.assertIn("project        #1 ForgeFlow [Todo]", out)
         code, out, _ = self.run_cli("status", job.job_id, "--json")
         self.assertEqual(json.loads(out)["job"]["state"], "ready")
@@ -189,7 +189,7 @@ class SkillAdapterTests(unittest.TestCase):
                 self.assertRegex(front, r"(?m)^description:\s*\S")
 
     def test_adapters_only_run_implemented_commands(self) -> None:
-        implemented = {"doctor", "status"}
+        implemented = {"doctor", "status", "init", "skills", "idea", "design", "handoff"}
         for path in self.ADAPTERS:
             with self.subTest(str(path)):
                 text = path.read_text(encoding="utf-8")
@@ -197,6 +197,26 @@ class SkillAdapterTests(unittest.TestCase):
                 self.assertEqual(used, implemented)
                 for op in cli.NOT_YET:
                     self.assertIn(f"`{op}`", text, f"{op} must be listed as not implemented")
+
+    def test_adapters_never_run_approve_themselves(self) -> None:
+        for path in self.ADAPTERS:
+            with self.subTest(str(path)):
+                text = path.read_text(encoding="utf-8")
+                self.assertNotRegex(text, r"(?m)^\|.*python -m forgeflow approve")
+                self.assertIn("py -3.13 -m forgeflow approve", text)  # told to the human
+
+    def test_adapters_share_the_same_operations(self) -> None:
+        texts = [p.read_text(encoding="utf-8") for p in self.ADAPTERS]
+        commands = [
+            sorted(
+                {
+                    re.sub(r"--host [\w-]+", "--host <host>", c)
+                    for c in re.findall(r"`python -m forgeflow ([^`]+)`", t)
+                }
+            )
+            for t in texts
+        ]
+        self.assertEqual(commands[0], commands[1])
 
 
 if __name__ == "__main__":

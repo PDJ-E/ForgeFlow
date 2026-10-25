@@ -65,7 +65,7 @@ class LinkIssueTests(GitRepoTestCase):
         first = self.approved_job()
         client = GitHubClient(runner=FakeGitHub({7: "OPEN"}))
         link_issue(self.store, first.job_id, 7, client)
-        second = self.new_job()
+        second = self.approved_job()
         with self.assertRaisesRegex(ActiveJobError, "already owned"):
             link_issue(self.store, second.job_id, 7, client)
 

@@ -15,15 +15,15 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
-from forgeflow import MIN_PYTHON
+from forgeflow import MIN_PYTHON, hostskills
 from forgeflow.errors import ForgeFlowError, ToolNotFoundError
 from forgeflow.gitrepo import discover_identity, git, porcelain_status
+from forgeflow.hostskills import KNOWLEDGE_WORK_PLUGINS
 from forgeflow.proc import CommandResult, Runner, run_command, which
 from forgeflow.providers import REAL_PROVIDERS, ProviderCapabilities
 from forgeflow.store import RUNTIME_RELATIVE, JobStore
 
 MIN_GIT = (2, 31)  # `git rev-parse --path-format=absolute`
-KNOWLEDGE_WORK_PLUGINS = ("engineering", "product-management", "data", "productivity")
 SKILL_ADAPTERS = {
     "claude": Path(".claude") / "skills" / "forge" / "SKILL.md",
     "codex": Path(".agents") / "skills" / "forge" / "SKILL.md",
@@ -174,7 +174,7 @@ def check_github(runner: Runner, slug: str | None, network: bool) -> list[Check]
         )
         return checks
     if slug:
-        projects = _linked_projects(runner, slug)
+        projects = linked_projects(runner, slug)
         data["projects"] = projects
         if projects is None:
             checks.append(Check("github-project", WARN, False, "Project lookup failed", data))
@@ -207,7 +207,7 @@ def _token_scopes(runner: Runner) -> set[str] | None:
     return None
 
 
-def _linked_projects(runner: Runner, slug: str) -> list[dict[str, Any]] | None:
+def linked_projects(runner: Runner, slug: str) -> list[dict[str, Any]] | None:
     owner, _, name = slug.partition("/")
     query = (
         "query($owner: String!, $name: String!) {"
@@ -299,44 +299,26 @@ def check_providers(runner: Runner) -> list[Check]:
 
 
 def check_plugins(runner: Runner) -> Check:
-    if which("claude") is None:
+    found = hostskills.claude_code_skills(runner)
+    if found.status == "unavailable":
         return Check(
             "anthropic-plugins",
             MISSING,
             False,
             "Claude Code not installed; Knowledge Work plugins cannot be checked",
         )
-    result = _try(runner, ["claude", "plugin", "list", "--json"], timeout=60)
-    if result is None or not result.ok:
-        return Check("anthropic-plugins", WARN, False, "`claude plugin list --json` failed")
-    try:
-        plugins = json.loads(result.stdout)
-    except ValueError:
-        return Check("anthropic-plugins", WARN, False, "plugin list output was not JSON")
-    found: dict[str, dict[str, Any]] = {}
-    for plugin in plugins if isinstance(plugins, list) else []:
-        base = str(plugin.get("id", "")).split("@", 1)[0]
-        if base in KNOWLEDGE_WORK_PLUGINS:
-            install = Path(str(plugin.get("installPath", "")))
-            skills_dir = install / "skills"
-            skills = (
-                sorted(p.parent.name for p in skills_dir.glob("*/SKILL.md"))
-                if skills_dir.is_dir()
-                else []
-            )
-            found[base] = {
-                "id": plugin.get("id"),
-                "version": plugin.get("version"),
-                "enabled": bool(plugin.get("enabled")),
-                "skills": [f"{base}:{s}" for s in skills],
-            }
-    enabled = [n for n in KNOWLEDGE_WORK_PLUGINS if found.get(n, {}).get("enabled")]
+    if found.status != "ok":
+        return Check("anthropic-plugins", WARN, False, found.detail)
+    enabled = [n for n in KNOWLEDGE_WORK_PLUGINS if n in found.enabled()]
     absent = [n for n in KNOWLEDGE_WORK_PLUGINS if n not in enabled]
-    data = {"plugins": found, "subprocess_access": "not probed by doctor (needs a model call)"}
+    data = {
+        "plugins": {name: asdict(p) for name, p in found.plugins.items()},
+        "subprocess_access": "not probed by doctor (needs a model call)",
+    }
     summary = f"enabled: {', '.join(enabled) or 'none'}"
     if absent:
         summary += f"; not enabled: {', '.join(absent)} (ForgeFlow falls back to its own prompts)"
-    core = {"engineering", "product-management"}
+    core = set(hostskills.CORE_PLUGINS)
     return Check("anthropic-plugins", OK if core <= set(enabled) else WARN, False, summary, data)
 
 
