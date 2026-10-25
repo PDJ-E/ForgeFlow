@@ -19,7 +19,7 @@ from forgeflow.errors import ForgeFlowError
 from forgeflow.gitrepo import main_worktree_root
 from forgeflow.jobs import WORKER_STATES, Job
 from forgeflow.proc import hostname, pid_alive
-from forgeflow.store import JobStore
+from forgeflow.store import JobStore, worker_status
 
 NOT_YET = {
     "init": "B",
@@ -125,7 +125,14 @@ def _lease_state(job: Job) -> str:
         return f"held on {lease.holder_host} (pid {lease.holder_pid}); not verifiable here"
     alive = pid_alive(lease.holder_pid)
     who = f"{lease.role} {lease.provider}, pid {lease.holder_pid}"
-    return f"{who} (running)" if alive else f"{who} (process gone - recovery needed)"
+    if alive:
+        return f"{who} (running)"
+    if worker_status(lease) in ("running", "unverifiable"):
+        return (
+            f"{who} (process gone; provider pid {lease.worker_pid} still running - stop it, "
+            "then recover)"
+        )
+    return f"{who} (process gone - recovery needed)"
 
 
 def _status(start: Path, job_id: str | None, *, as_json: bool, events: int) -> int:

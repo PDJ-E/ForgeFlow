@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from forgeflow.errors import GitError
-from forgeflow.proc import CommandResult, Runner, run_command
+from forgeflow.proc import CommandResult, Runner, redact_credentials, run_command
 
 # Read-only inspection must not take .git/index.lock and collide with the user's own git use.
 READ_ONLY_ENV = {"GIT_OPTIONAL_LOCKS": "0"}
@@ -74,7 +74,7 @@ def main_worktree_root(path: Path, runner: Runner = run_command) -> Path:
 def discover_identity(path: Path, runner: Runner = run_command) -> RepoIdentity:
     root = main_worktree_root(path, runner)
     remote = git(root, "remote", "get-url", "origin", runner=runner, read_only=True)
-    remote_url = remote.stdout.strip() if remote.ok else None
+    raw_url = remote.stdout.strip() if remote.ok else None
     head = git(
         root,
         "symbolic-ref",
@@ -87,8 +87,9 @@ def discover_identity(path: Path, runner: Runner = run_command) -> RepoIdentity:
     base = head.stdout.strip().split("/", 1)[-1] if head.ok and head.stdout.strip() else "main"
     return RepoIdentity(
         root=str(root),
-        slug=github_slug_from_remote(remote_url) if remote_url else None,
-        remote_url=remote_url,
+        slug=github_slug_from_remote(raw_url) if raw_url else None,
+        # Never keep credentials embedded in the remote (https://user:token@host/...).
+        remote_url=redact_credentials(raw_url) if raw_url else None,
         base_branch=base,
     )
 

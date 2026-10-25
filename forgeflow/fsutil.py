@@ -32,11 +32,16 @@ _REPLACE_ATTEMPTS = 12
 
 def atomic_write_text(path: Path, text: str) -> None:
     """Replace ``path`` with ``text`` so readers see either the old or the new content."""
+    atomic_write_bytes(path, text.encode("utf-8"))
+
+
+def atomic_write_bytes(path: Path, data: bytes) -> None:
+    """Replace ``path`` with ``data`` so readers see either the old or the new content."""
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
     try:
-        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as fh:
-            fh.write(text)
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(data)
             fh.flush()
             os.fsync(fh.fileno())
         _replace_with_retry(tmp_name, path)

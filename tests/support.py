@@ -22,14 +22,14 @@ from forgeflow.store import JobStore
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
-def _on_rm_error(func: Callable[..., object], path: str, _exc: object) -> None:
+def _on_rm_error(func: Callable[..., object], path: str, _exc: BaseException) -> None:
     # Git marks object files read-only; Windows refuses to delete those.
     os.chmod(path, stat.S_IWRITE)
     func(path)
 
 
 def rmtree(path: Path) -> None:
-    shutil.rmtree(path, onerror=_on_rm_error)
+    shutil.rmtree(path, onexc=_on_rm_error)
 
 
 def run_git(repo: Path, *args: str) -> str:
@@ -137,6 +137,39 @@ class GitRepoTestCase(unittest.TestCase):
 
         return self.store.update(job_id, apply, event="pr-linked")
 
+    def tamper(self, job_id: str, edit: Callable[[dict[str, Any]], None]) -> None:
+        """Edit job.json behind the store's back, as a buggy or hostile local process could."""
+        path = self.store.job_dir(job_id) / "job.json"
+        data = json.loads(path.read_text("utf-8"))
+        edit(data)
+        path.write_text(json.dumps(data), encoding="utf-8")
+
+
+def pull_request(
+    number: int,
+    *,
+    head_ref: str,
+    head_sha: str,
+    draft: bool = True,
+    state: str = "OPEN",
+    merged: bool = False,
+    repo: str = "example/demo",
+    base_ref: str = "main",
+) -> dict[str, Any]:
+    """A `gh api graphql` pullRequest node, as FakeGitHub returns it."""
+    return {
+        "number": number,
+        "url": f"https://github.com/{repo}/pull/{number}",
+        "state": "MERGED" if merged else state,
+        "isDraft": draft,
+        "merged": merged,
+        "mergedAt": "2026-10-25T00:00:00Z" if merged else None,
+        "headRefName": head_ref,
+        "headRefOid": head_sha,
+        "baseRefName": base_ref,
+        "headRepository": {"nameWithOwner": repo},
+    }
+
 
 class FakeGitHub:
     """Stands in for `gh api graphql`. Issues map number -> state; PR numbers are not issues."""
@@ -147,8 +180,10 @@ class FakeGitHub:
         *,
         project_scope: bool = True,
         project_items: Sequence[dict[str, object]] | None = None,
+        pull_requests: Mapping[int, dict[str, Any]] | None = None,
     ) -> None:
         self.issues = dict(issues)
+        self.pull_requests = dict(pull_requests or {})
         self.project_scope = project_scope
         self.project_items = (
             list(project_items)
@@ -180,6 +215,10 @@ class FakeGitHub:
         args = dict(a.split("=", 1) for a in argv if "=" in a and not a.startswith("query="))
         query = next(a for a in argv if a.startswith("query="))
         number = int(args["number"])
+        if "pullRequest(" in query:
+            pr = self.pull_requests.get(number)
+            pr_body = {"data": {"repository": {"pullRequest": pr}}}
+            return CommandResult(tuple(argv), 0, json.dumps(pr_body), "")
         if "projectItems" in query:
             if not self.project_scope:
                 body: dict[str, Any] = {

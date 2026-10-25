@@ -8,13 +8,17 @@ Safety rules:
   repaired, pruned or removed automatically. Each such case is a ``WorktreeError`` naming
   the conflict so a human can decide.
 * Removal goes through ``git worktree remove`` without ``--force``, and only for a clean,
-  registered worktree that ForgeFlow created. The branch is always kept.
+  registered worktree that ForgeFlow created and that holds no ignored files: git deletes
+  ignored files (``.env``, local data, caches) without asking. The branch is always kept.
+* Before anything runs in a worktree, ``verify_job_worktree`` proves that the recorded path is
+  the job's own location, registered with git on the job's branch.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from forgeflow import fsutil
 from forgeflow.errors import GitError, ValidationError, WorktreeError
@@ -28,7 +32,9 @@ from forgeflow.gitrepo import (
 )
 from forgeflow.jobs import Job, JobState, Worktree, branch_for
 from forgeflow.proc import Runner, run_command
-from forgeflow.store import JobStore
+
+if TYPE_CHECKING:
+    from forgeflow.store import JobStore
 
 WORKTREES_RELATIVE = Path(".forge") / "worktrees"
 
@@ -64,6 +70,7 @@ class WorktreeStatus:
     branch: str | None
     head: str | None
     dirty_paths: list[str] = field(default_factory=list)
+    ignored_paths: list[str] = field(default_factory=list)
     prunable: bool = False
 
     @property
@@ -95,12 +102,10 @@ def parse_worktree_list(porcelain: str) -> list[WorktreeEntry]:
 
 
 class WorktreeManager:
-    def __init__(
-        self, repo_root: Path, runner: Runner = run_command, worktrees_dir: Path | None = None
-    ) -> None:
+    def __init__(self, repo_root: Path, runner: Runner = run_command) -> None:
         self.repo_root = repo_root
         self.runner = runner
-        self.worktrees_dir = worktrees_dir or repo_root / WORKTREES_RELATIVE
+        self.worktrees_dir = repo_root / WORKTREES_RELATIVE
 
     def path_for(self, job_id: str) -> Path:
         return self.worktrees_dir / job_id
@@ -147,8 +152,10 @@ class WorktreeManager:
         entry = self._entry_for(path)
         exists = path.exists()
         dirty: list[str] = []
+        ignored: list[str] = []
         if entry is not None and exists:
             dirty = porcelain_status(path, self.runner)
+            ignored = ignored_paths(path, self.runner)
         return WorktreeStatus(
             path=str(path),
             exists=exists,
@@ -156,6 +163,7 @@ class WorktreeManager:
             branch=entry.branch.removeprefix("refs/heads/") if entry and entry.branch else None,
             head=entry.head if entry else None,
             dirty_paths=dirty,
+            ignored_paths=ignored,
             prunable=bool(entry and entry.prunable),
         )
 
@@ -245,7 +253,11 @@ class WorktreeManager:
         return recorded
 
     def remove(self, recorded: Worktree) -> None:
-        """Remove a clean worktree ForgeFlow created. Never forces; the branch is kept."""
+        """Remove a clean worktree ForgeFlow created. Never forces; the branch is kept.
+
+        Refuses if git ignores any file in it, because ``git worktree remove`` would delete
+        those files silently. Moving them out (or deleting them deliberately) is a human call.
+        """
         path = Path(recorded.path)
         fsutil.ensure_within(self.worktrees_dir, path)
         if not recorded.created_by_forgeflow:
@@ -259,7 +271,58 @@ class WorktreeManager:
             raise WorktreeError(
                 f"{path} has {len(status.dirty_paths)} uncommitted change(s); refusing to remove it"
             )
+        if status.ignored_paths:
+            shown = ", ".join(status.ignored_paths[:5])
+            more = len(status.ignored_paths) - 5
+            raise WorktreeError(
+                f"{path} contains ignored files that git would delete ({shown}"
+                f"{f', and {more} more' if more > 0 else ''}); refusing to remove it"
+            )
         git_ok(self.repo_root, "worktree", "remove", str(path), runner=self.runner)
+
+
+def ignored_paths(path: Path, runner: Runner = run_command) -> list[str]:
+    """Files and directories in the worktree that git ignores (``!!`` entries)."""
+    result = git(
+        path,
+        "status",
+        "--porcelain=v1",
+        "--ignored=matching",
+        "--untracked-files=normal",
+        runner=runner,
+        read_only=True,
+    )
+    if not result.ok:
+        raise GitError(result.describe())
+    return [line[3:] for line in result.stdout.splitlines() if line.startswith("!! ")]
+
+
+def verify_job_worktree(job: Job, runner: Runner = run_command) -> Path:
+    """The job's worktree, after proving it is ForgeFlow's registered worktree for this job.
+
+    The location is derived from the repository root and the job id, never taken from the
+    record alone, so a tampered record cannot point a builder or a check run at the main
+    checkout or at another worktree.
+    """
+    if job.worktree is None:
+        raise WorktreeError(f"job {job.job_id} has no worktree")
+    root = Path(job.repo.root)
+    expected = root / WORKTREES_RELATIVE / job.job_id
+    branch = branch_for(job.job_id)
+    if fsutil.normalized(job.worktree.path) != fsutil.normalized(expected):
+        raise WorktreeError(f"recorded worktree {job.worktree.path} is not {expected}")
+    if job.worktree.branch != branch:
+        raise WorktreeError(f"recorded worktree branch {job.worktree.branch} is not {branch}")
+    status = WorktreeManager(root, runner).inspect(expected)
+    if not (status.registered and status.exists) or status.prunable or status.branch != branch:
+        raise WorktreeError(
+            f"{expected} is not a registered worktree checked out on {branch}; "
+            "refusing to run anything there"
+        )
+    top = git_ok(expected, "rev-parse", "--show-toplevel", runner=runner, read_only=True)
+    if fsutil.normalized(top) != fsutil.normalized(expected):
+        raise WorktreeError(f"{expected} belongs to the checkout at {top}")
+    return expected
 
 
 def prepare_job_worktree(
@@ -271,15 +334,5 @@ def prepare_job_worktree(
     if fsutil.normalized(job.repo.root) != fsutil.normalized(manager.repo_root):
         raise ValidationError("the worktree manager belongs to a different repository")
     worktree = manager.create_or_reattach(job, base_ref)
-
-    def record(j: Job) -> None:
-        j.worktree = worktree
-
-    # No revision check: nothing else writes `worktree`, and failing here would strand a
-    # freshly created worktree that the next attempt must then refuse as unrecorded.
-    return store.update(
-        job_id,
-        record,
-        event="worktree-prepared",
-        details={"path": worktree.path, "branch": worktree.branch, "base_sha": worktree.base_sha},
-    )
+    # Idempotent for the same worktree; refuses any other location or a second worktree.
+    return store.record_worktree(job_id, worktree)

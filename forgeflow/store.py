@@ -9,6 +9,7 @@ Layout (inside the main checkout, self-ignored by git)::
             job.json          current snapshot (atomic replace, revisioned)
             events.jsonl      append-only audit trail of changes and decisions
             lease.lock        OS lock held by the live worker process for the job
+            plans/<sha256>.md byte-exact snapshot of each submitted plan; builders get this text
             evidence/         machine-readable results (checks, provider output, reviews)
 
 Concurrency model:
@@ -18,8 +19,14 @@ Concurrency model:
 * ``lease.lock`` is held for as long as a worker owns the job. Because it is an OS lock it is
   released automatically if the worker process dies, which is how an interruption is detected
   without trusting PIDs. The lease record in ``job.json`` names the holder for diagnostics and
-  for detecting an orphaned provider subprocess that outlived its orchestrator.
+  the provider subprocess (PID plus start time). While that subprocess still runs, the lease
+  record is never cleared, so no second builder can start next to it.
 * A job sitting in a worker state without a live lease is, by definition, interrupted.
+
+Delivery states are reached only through methods that verify, not through caller claims:
+``request_merge_approval`` (Gate B) needs checks that ``run_checks`` itself ran on the current
+build round's commit, and a draft PR that GitHub reports with exactly that head commit;
+``record_merge`` needs GitHub to report that PR merged with that head commit.
 """
 
 from __future__ import annotations
@@ -28,22 +35,24 @@ import hashlib
 import os
 import re
 import secrets
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from types import TracebackType
-from typing import Any
+from typing import Any, Protocol
 
 from forgeflow import fsutil
 from forgeflow.errors import (
     ActiveJobError,
     ConcurrencyError,
     DuplicateWorkerError,
+    ForgeFlowError,
     InvalidTransitionError,
     LeaseError,
     StaleLeaseError,
     ValidationError,
 )
+from forgeflow.gitrepo import git_ok, porcelain_status
 from forgeflow.jobs import (
     REWORK_SOURCES,
     SLOT_STATES,
@@ -57,19 +66,36 @@ from forgeflow.jobs import (
     Lease,
     Plan,
     Policy,
+    PullRequestLink,
+    PullRequestObservation,
     Repo,
+    Worktree,
+    branch_for,
     new_job_id,
     utc_now,
     validate_job_id,
 )
-from forgeflow.proc import hostname, pid_alive
+from forgeflow.proc import (
+    Runner,
+    hostname,
+    pid_alive,
+    process_started_at,
+    redact_credentials,
+    run_command,
+)
+from forgeflow.worktree import WORKTREES_RELATIVE, verify_job_worktree
 
 S = JobState
 RUNTIME_RELATIVE = Path(".forge") / "runtime"
 _EVIDENCE_KIND = re.compile(r"^[a-z][a-z0-9-]{0,40}$")
+_OUTPUT_TAIL = 4000  # characters of each check command's output kept as evidence
 
 # A lease may be taken only where a worker legitimately starts or resumes.
 _LEASE_START_STATES = frozenset({S.READY, S.INTERRUPTED, S.AWAITING_MERGE_APPROVAL})
+# States whose entry ends the recorded lease.
+_LEASE_ENDING_STATES = TERMINAL_STATES | {S.NEEDS_HUMAN, S.AWAITING_MERGE_APPROVAL}
+# worker_status() answers that must keep the job owned.
+_WORKER_BLOCKING = frozenset({"running", "unverifiable"})
 
 
 @dataclass(frozen=True)
@@ -77,6 +103,29 @@ class RecoveryReport:
     job_id: str
     outcome: str  # running | orphaned-worker | foreign-host | recovered | nothing-to-recover
     detail: str
+
+
+class PullRequestSource(Protocol):
+    """Where pull request facts come from: ``github.GitHubClient`` (or a fake in tests)."""
+
+    def view_pull_request(self, repo: str, number: int) -> PullRequestObservation: ...
+
+
+def worker_status(lease: Lease | None) -> str:
+    """State of the lease's provider subprocess: none | running | gone | unverifiable.
+
+    ``running`` means the same process (PID and start time) is alive. ``unverifiable`` means a
+    process with that PID is alive but cannot be matched to the recorded one; callers that
+    could start a second writer must treat it like ``running``.
+    """
+    if lease is None or not lease.worker_pid:
+        return "none"
+    started = process_started_at(lease.worker_pid)
+    if started is not None:
+        if lease.worker_started_at is None:
+            return "unverifiable"
+        return "running" if started == lease.worker_started_at else "gone"
+    return "unverifiable" if pid_alive(lease.worker_pid) else "gone"
 
 
 class JobStore:
@@ -89,6 +138,11 @@ class JobStore:
     def for_repo(cls, repo_root: Path, lock_timeout: float = 10.0) -> JobStore:
         return cls(repo_root / RUNTIME_RELATIVE, lock_timeout=lock_timeout)
 
+    @property
+    def repo_root(self) -> Path:
+        """The main checkout this store belongs to (the store lives in ``.forge/runtime``)."""
+        return self.runtime_dir.parent.parent
+
     # --- paths -----------------------------------------------------------------------------
 
     def job_dir(self, job_id: str) -> Path:
@@ -100,6 +154,9 @@ class JobStore:
     def _events_file(self, job_id: str) -> Path:
         return self.job_dir(job_id) / "events.jsonl"
 
+    def _plan_snapshot(self, job_id: str, digest: str) -> Path:
+        return self.job_dir(job_id) / "plans" / f"{digest}.md"
+
     def _lease_lock(self, job_id: str) -> fsutil.FileLock:
         return fsutil.FileLock(self.job_dir(job_id) / "lease.lock", timeout=0)
 
@@ -109,6 +166,19 @@ class JobStore:
     def _ensure_layout(self) -> None:
         fsutil.write_self_ignoring_gitignore(self.runtime_dir)
         self.jobs_dir.mkdir(parents=True, exist_ok=True)
+
+    def require_own_repository(self, job: Job) -> None:
+        """Refuse a record that names another repository than the one holding this store."""
+        if fsutil.normalized(job.repo.root) != fsutil.normalized(self.repo_root):
+            raise ValidationError(
+                f"job {job.job_id} names repository {job.repo.root}, but this store belongs to "
+                f"{self.repo_root}"
+            )
+
+    def job_worktree(self, job: Job, runner: Runner = run_command) -> Path:
+        """The job's own registered worktree, verified against git; never another checkout."""
+        self.require_own_repository(job)
+        return verify_job_worktree(job, runner)
 
     # --- reads (never create files, never take locks) ----------------------------------------
 
@@ -148,16 +218,34 @@ class JobStore:
         records, _ = fsutil.read_jsonl(self._events_file(job_id))
         return records
 
-    def plan_digest(self, job: Job) -> str:
-        """sha256 of the plan file as it is on disk right now."""
+    def _read_plan(self, job: Job) -> bytes:
         if not job.plan.path:
             raise InvalidTransitionError(f"job {job.job_id} has no plan document")
         root = Path(job.repo.root)
         plan_file = fsutil.ensure_within(root, root / job.plan.path)
         try:
-            return hashlib.sha256(plan_file.read_bytes()).hexdigest()
+            return plan_file.read_bytes()
         except FileNotFoundError as exc:
             raise InvalidTransitionError(f"plan document {job.plan.path} is missing") from exc
+
+    def plan_digest(self, job: Job) -> str:
+        """sha256 of the plan file in the main checkout as it is on disk right now."""
+        return hashlib.sha256(self._read_plan(job)).hexdigest()
+
+    def approved_plan_text(self, job: Job) -> str:
+        """Exactly the bytes that were approved, from the job's snapshot, decoded as UTF-8."""
+        approval = job.plan.approval
+        if approval is None or approval.gate != "plan":
+            raise InvalidTransitionError("Gate A: the plan has not been approved")
+        try:
+            data = self._plan_snapshot(job.job_id, approval.subject_sha256).read_bytes()
+        except FileNotFoundError as exc:
+            raise InvalidTransitionError(
+                "the approved plan snapshot is missing; resubmit the plan for approval"
+            ) from exc
+        if hashlib.sha256(data).hexdigest() != approval.subject_sha256:
+            raise InvalidTransitionError("the approved plan snapshot was modified")
+        return data.decode("utf-8")
 
     # --- creation and generic mutation -----------------------------------------------------
 
@@ -165,6 +253,10 @@ class JobStore:
         """Create a DRAFT job. Drafts are discussion-only and never dispatch code."""
         if not title.strip():
             raise ValidationError("title must not be empty")
+        if fsutil.normalized(repo.root) != fsutil.normalized(self.repo_root):
+            raise ValidationError(
+                f"repository {repo.root} is not the one this store belongs to ({self.repo_root})"
+            )
         with self._state_lock():
             self._ensure_layout()
             for _ in range(5):
@@ -177,7 +269,7 @@ class JobStore:
             else:  # pragma: no cover - 16M ids per day
                 raise ValidationError("could not allocate a unique job id")
             now = utc_now()
-            job = Job(
+            draft = Job(
                 job_id=job_id,
                 title=title.strip(),
                 state=S.DRAFT,
@@ -187,7 +279,7 @@ class JobStore:
                 updated_at=now,
                 revision=1,
             )
-            Job.from_dict(job.to_dict())  # validate before the first write
+            job = Job.from_dict(draft.to_dict())  # validate (and redact) before the first write
             fsutil.atomic_write_json(self._job_file(job_id), job.to_dict())
             self._append_event(job, "created", None, details={"title": job.title})
         return job
@@ -201,10 +293,11 @@ class JobStore:
         details: dict[str, Any] | None = None,
         expected_revision: int | None = None,
     ) -> Job:
-        """Change non-lifecycle fields (links, worktree, evidence).
+        """Change non-lifecycle fields (links, evidence).
 
-        State, approvals, lease and attempt counters can only change through ``transition`` and
-        the lease API, so a careless ``mutate`` cannot bypass a gate.
+        State, approvals, lease, attempts, the repository and the worktree can only change
+        through ``transition``, the lease API and ``record_worktree``, so a careless ``mutate``
+        cannot bypass a gate or point the builder at another checkout.
         """
 
         def guarded(job: Job) -> None:
@@ -212,8 +305,8 @@ class JobStore:
             mutate(job)
             if _protected_fields(job) != protected:
                 raise InvalidTransitionError(
-                    "update() may not change state, plan approval, lease or attempts; "
-                    "use transition() or the lease API"
+                    "update() may not change state, plan approval, lease, attempts, repository "
+                    "or worktree; use transition(), the lease API or record_worktree()"
                 )
 
         return self._mutate(job_id, guarded, event, details, expected_revision)
@@ -268,10 +361,31 @@ class JobStore:
             record["details"] = details
         fsutil.append_jsonl(self._events_file(job.job_id), record)
 
+    def record_worktree(self, job_id: str, worktree: Worktree) -> Job:
+        """Record the job's worktree: only its own location and branch, and only once."""
+        expected = self.repo_root / WORKTREES_RELATIVE / job_id
+        if fsutil.normalized(worktree.path) != fsutil.normalized(expected) or (
+            worktree.branch != branch_for(job_id)
+        ):
+            raise ValidationError(
+                f"a job's worktree must be {expected} on {branch_for(job_id)}, not "
+                f"{worktree.path} on {worktree.branch}"
+            )
+
+        def apply(job: Job) -> None:
+            if job.is_terminal:
+                raise InvalidTransitionError(f"job {job_id} is {job.state.value}")
+            if job.worktree is not None and job.worktree != worktree:
+                raise InvalidTransitionError("the job's worktree is already recorded")
+            job.worktree = worktree
+
+        details = {"path": worktree.path, "branch": worktree.branch, "base_sha": worktree.base_sha}
+        return self._mutate(job_id, apply, "worktree-prepared", details, None)
+
     # --- lifecycle -------------------------------------------------------------------------
 
     def submit_plan(self, job_id: str, plan_path: str, *, reason: str = "") -> Job:
-        """DRAFT -> AWAITING_PLAN_APPROVAL, pinning the plan document's current hash."""
+        """DRAFT -> AWAITING_PLAN_APPROVAL, pinning the plan document's exact bytes and hash."""
         rel = Path(plan_path)
         if rel.is_absolute() or ".." in rel.parts:
             raise ValidationError("plan path must be relative to the repository root")
@@ -279,7 +393,13 @@ class JobStore:
         def apply(job: Job) -> None:
             self._require_transition(job, S.AWAITING_PLAN_APPROVAL)
             job.plan = Plan(path=rel.as_posix())
-            job.plan.sha256 = self.plan_digest(job)
+            data = self._read_plan(job)
+            try:
+                data.decode("utf-8")
+            except UnicodeDecodeError as exc:
+                raise ValidationError(f"plan document {rel.as_posix()} is not UTF-8") from exc
+            job.plan.sha256 = hashlib.sha256(data).hexdigest()
+            fsutil.atomic_write_bytes(self._plan_snapshot(job.job_id, job.plan.sha256), data)
             job.state = S.AWAITING_PLAN_APPROVAL
 
         return self._mutate(
@@ -294,7 +414,6 @@ class JobStore:
         reason: str = "",
         approval: Approval | None = None,
         lease_token: str | None = None,
-        merge_observation: dict[str, Any] | None = None,
         expected_revision: int | None = None,
     ) -> Job:
         """Move a job to ``target`` if the table and the target's guard allow it."""
@@ -302,11 +421,59 @@ class JobStore:
             raise InvalidTransitionError("INTERRUPTED is entered only through recovery")
         if target is S.AWAITING_PLAN_APPROVAL:
             raise InvalidTransitionError("use submit_plan() to request plan approval")
+        if target is S.AWAITING_MERGE_APPROVAL:
+            raise InvalidTransitionError("use request_merge_approval(), which verifies the PR")
+        if target is S.MERGED:
+            raise InvalidTransitionError("use record_merge(), which verifies the merge on GitHub")
+        return self._transition(
+            job_id,
+            target,
+            reason=reason,
+            approval=approval,
+            lease_token=lease_token,
+            expected_revision=expected_revision,
+        )
+
+    def request_merge_approval(
+        self, job_id: str, lease_token: str, github: PullRequestSource
+    ) -> Job:
+        """REVIEWING -> AWAITING_MERGE_APPROVAL (Gate B) after verifying checks and the PR.
+
+        The linked PR is looked up on GitHub; it must be an open draft from the job's branch
+        whose head is exactly the commit the current round's passing checks ran on.
+        """
+        observed = self._observe_linked_pr(job_id, github)
+        return self._transition(
+            job_id, S.AWAITING_MERGE_APPROVAL, lease_token=lease_token, observed=observed
+        )
+
+    def record_merge(self, job_id: str, github: PullRequestSource) -> Job:
+        """AWAITING_MERGE_APPROVAL -> MERGED, only for a merge GitHub reports. Never merges."""
+        observed = self._observe_linked_pr(job_id, github)
+        return self._transition(job_id, S.MERGED, observed=observed)
+
+    def _observe_linked_pr(self, job_id: str, github: PullRequestSource) -> PullRequestObservation:
+        job = self.load(job_id)
+        if job.github.pull_request is None or not job.repo.slug:
+            raise InvalidTransitionError("Gate B: a linked draft pull request is required")
+        return github.view_pull_request(job.repo.slug, job.github.pull_request.number)
+
+    def _transition(
+        self,
+        job_id: str,
+        target: JobState,
+        *,
+        reason: str = "",
+        approval: Approval | None = None,
+        lease_token: str | None = None,
+        observed: PullRequestObservation | None = None,
+        expected_revision: int | None = None,
+    ) -> Job:
         details: dict[str, Any] = {"reason": reason} if reason else {}
         if approval is not None:
             details["approval"] = approval.to_dict()
-        if merge_observation is not None:
-            details["merge_observation"] = merge_observation
+        if observed is not None:
+            details["pull_request_observed"] = observed.to_dict()
 
         with self._state_lock():
 
@@ -319,9 +486,9 @@ class JobStore:
                     reason=reason,
                     approval=approval,
                     lease_token=lease_token,
-                    merge_observation=merge_observation,
+                    observed=observed,
                 )
-                self._apply_side_effects(job, source, target, approval)
+                self._apply_side_effects(job, source, target, approval, observed)
                 job.state = target
 
             return self._mutate_locked(
@@ -344,7 +511,7 @@ class JobStore:
         reason: str,
         approval: Approval | None,
         lease_token: str | None,
-        merge_observation: dict[str, Any] | None,
+        observed: PullRequestObservation | None,
     ) -> None:
         source = job.state
 
@@ -380,6 +547,15 @@ class JobStore:
         if source in WORKER_STATES or target in WORKER_STATES:
             # Only the current owner may move a job into, through or out of a worker phase.
             self._require_lease(job, lease_token, target)
+        if job.lease is not None and (source is S.BUILDING or target in _LEASE_ENDING_STATES):
+            # The builder's provider must be gone before its output is verified, or before the
+            # lease ends and another builder could be started next to it.
+            status = worker_status(job.lease)
+            if status in _WORKER_BLOCKING:
+                raise InvalidTransitionError(
+                    f"provider process {job.lease.worker_pid} is still running ({status}); "
+                    f"stop it before leaving {source.value}"
+                )
         if target in WORKER_STATES:
             if target is S.BUILDING:
                 self._require_current_plan_approval(job)  # Gate A is re-verified at dispatch
@@ -394,29 +570,96 @@ class JobStore:
                 )
 
         if target is S.AWAITING_MERGE_APPROVAL:
-            pr = job.github.pull_request
-            if pr is None or not pr.is_draft:
-                raise InvalidTransitionError("Gate B: a linked draft pull request is required")
-            checks = [e for e in job.evidence if e.kind == "checks"]
-            if not checks or checks[-1].status != "passed":
-                raise InvalidTransitionError("the latest deterministic checks did not pass")
-
-        if target is S.MERGED:
-            pr = job.github.pull_request
-            observed = merge_observation or {}
-            if (
-                pr is None
-                or observed.get("source") != "github"
-                or observed.get("pr_number") != pr.number
-                or not observed.get("merged_at")
-            ):
+            checks = self._require_current_checks(job)
+            pr = self._require_linked_pr(job, observed)
+            if pr.state != "OPEN" or not pr.is_draft:
                 raise InvalidTransitionError(
-                    "MERGED records a merge observed on GitHub for the linked PR; ForgeFlow "
-                    "never merges"
+                    f"Gate B: PR #{pr.number} must be an open draft (it is {pr.state}"
+                    f"{', draft' if pr.is_draft else ', not a draft'})"
+                )
+            if pr.head_sha != checks.commit:
+                raise InvalidTransitionError(
+                    f"Gate B: PR #{pr.number} head commit {pr.head_sha[:12]} is not the "
+                    f"validated commit {(checks.commit or '?')[:12]}; run the checks on it"
+                )
+            head = self._clean_head(self.job_worktree(job))
+            if head != checks.commit:
+                raise InvalidTransitionError(
+                    f"Gate B: the worktree moved to commit {head[:12]} after the checks ran"
                 )
 
+        if target is S.MERGED:
+            checks = self._require_current_checks(job)
+            pr = self._require_linked_pr(job, observed)
+            if not pr.merged or not pr.merged_at:
+                raise InvalidTransitionError(
+                    f"PR #{pr.number} is not merged on GitHub (state {pr.state}); ForgeFlow "
+                    "only records merges it observes and never merges"
+                )
+            if pr.head_sha != checks.commit:
+                raise InvalidTransitionError(
+                    f"PR #{pr.number} was merged with head commit {pr.head_sha[:12]}, not the "
+                    f"validated commit {(checks.commit or '?')[:12]}; investigate, or cancel "
+                    "the job with a reason"
+                )
+
+    def _require_current_checks(self, job: Job) -> Evidence:
+        """The latest checks evidence, if run_checks produced it this round and it passed."""
+        checks = [e for e in job.evidence if e.kind == "checks"]
+        if not checks:
+            raise InvalidTransitionError("no deterministic checks were run for this job")
+        latest = checks[-1]
+        if latest.build_round != job.attempts.build:
+            raise InvalidTransitionError(
+                f"the latest checks ran in build round {latest.build_round}, not the current "
+                f"build round {job.attempts.build}; run them again"
+            )
+        if latest.mocked or latest.commit is None:
+            raise InvalidTransitionError(
+                "the latest checks evidence was not produced by run_checks"
+            )
+        if latest.status != "passed":
+            raise InvalidTransitionError("the latest deterministic checks did not pass")
+        simulated = sorted(
+            {e.kind for e in job.evidence if e.build_round == job.attempts.build and e.mocked}
+        )
+        if simulated:
+            raise InvalidTransitionError(
+                f"this build round includes mocked evidence ({', '.join(simulated)}); a "
+                "simulated build cannot be delivered"
+            )
+        return latest
+
+    def _require_linked_pr(
+        self, job: Job, observed: PullRequestObservation | None
+    ) -> PullRequestObservation:
+        linked = job.github.pull_request
+        if linked is None or observed is None or observed.number != linked.number:
+            raise InvalidTransitionError("Gate B: a linked draft pull request is required")
+        if job.worktree is None or not job.repo.slug:
+            raise InvalidTransitionError("the job has no worktree or GitHub repository")
+        expected = (job.repo.slug.lower(), job.worktree.branch, job.repo.base_branch)
+        actual = (
+            observed.repo.lower(),
+            observed.head_ref,
+            observed.base_ref,
+        )
+        head_repo = (observed.head_repo or "").lower()
+        if actual != expected or head_repo != job.repo.slug.lower():
+            raise InvalidTransitionError(
+                f"PR #{observed.number} is {observed.head_repo}:{observed.head_ref} -> "
+                f"{observed.base_ref} in {observed.repo}, not {job.repo.slug}:"
+                f"{job.worktree.branch} -> {job.repo.base_branch}"
+            )
+        return observed
+
     def _apply_side_effects(
-        self, job: Job, source: JobState, target: JobState, approval: Approval | None
+        self,
+        job: Job,
+        source: JobState,
+        target: JobState,
+        approval: Approval | None,
+        observed: PullRequestObservation | None,
     ) -> None:
         if target is S.PLAN_APPROVED:
             job.plan.approval = approval
@@ -430,7 +673,14 @@ class JobStore:
             if target in WORKER_STATES:
                 job.attempts.resumes += 1
             job.interrupted_from = None
-        if target in TERMINAL_STATES or target in (S.NEEDS_HUMAN, S.AWAITING_MERGE_APPROVAL):
+        if observed is not None:
+            job.github.pull_request = PullRequestLink(
+                number=observed.number,
+                url=observed.url,
+                is_draft=observed.is_draft,
+                state=observed.state,
+            )
+        if target in _LEASE_ENDING_STATES:
             # Human-facing and terminal states own no worker; the recorded lease ends here.
             job.lease = None
 
@@ -442,6 +692,7 @@ class JobStore:
             raise InvalidTransitionError(
                 "Gate A: the plan document changed after approval; it must be re-approved"
             )
+        self.approved_plan_text(job)  # the snapshot handed to builders must be intact too
 
     def _require_lease(self, job: Job, token: str | None, target: JobState) -> None:
         lease = job.lease
@@ -519,18 +770,46 @@ class JobStore:
     def record_evidence(
         self, job_id: str, kind: str, status: str, payload: dict[str, Any], *, mocked: bool
     ) -> Evidence:
+        """Record a provider result, review or other note. Check results come from run_checks."""
         if not _EVIDENCE_KIND.match(kind):
             raise ValidationError(f"invalid evidence kind {kind!r}")
+        if kind == "checks":
+            raise ValidationError(
+                "checks evidence is recorded only by run_checks(), which runs them"
+            )
+        return self._record_evidence(job_id, kind, status, payload, mocked=mocked, commit=None)
+
+    def _record_evidence(
+        self,
+        job_id: str,
+        kind: str,
+        status: str,
+        payload: dict[str, Any],
+        *,
+        mocked: bool,
+        commit: str | None,
+        check: Callable[[Job], None] | None = None,
+    ) -> Evidence:
         holder: list[Evidence] = []
 
         def apply(job: Job) -> None:
+            if check is not None:
+                check(job)
             seq = len(job.evidence) + 1
             rel = f"evidence/{seq:03d}-{kind}.json"
             fsutil.atomic_write_json(
                 self.job_dir(job_id) / rel,
                 {"kind": kind, "status": status, "mocked": mocked, "payload": payload},
             )
-            item = Evidence(kind=kind, path=rel, status=status, mocked=mocked, created_at=utc_now())
+            item = Evidence(
+                kind=kind,
+                path=rel,
+                status=status,
+                mocked=mocked,
+                created_at=utc_now(),
+                build_round=job.attempts.build,
+                commit=commit,
+            )
             job.evidence.append(item)
             holder.append(item)
 
@@ -538,10 +817,94 @@ class JobStore:
             job_id,
             apply,
             "evidence-recorded",
-            {"kind": kind, "status": status, "mocked": mocked},
+            {"kind": kind, "status": status, "mocked": mocked, "commit": commit},
             None,
         )
         return holder[0]
+
+    def run_checks(
+        self,
+        job_id: str,
+        lease_token: str,
+        commands: Sequence[Sequence[str]],
+        *,
+        runner: Runner = run_command,
+        timeout: float = 600.0,
+    ) -> Evidence:
+        """Run the deterministic checks in the job's worktree and record what really happened.
+
+        Only the lease holder may run them, only in VERIFYING, and only on a clean worktree.
+        The evidence names the commit they ran on; it passes only if every command exited 0 and
+        the commands left that commit and a clean worktree behind.
+        """
+        if not commands or any(not argv for argv in commands):
+            raise ValidationError("at least one non-empty check command is required")
+        job = self.load(job_id)
+        lease = job.lease
+        if lease is None or not secrets.compare_digest(lease.token, lease_token):
+            raise LeaseError("running checks requires the caller to hold the job lease")
+        if job.state is not S.VERIFYING:
+            raise InvalidTransitionError(f"checks run while verifying, not in {job.state.value}")
+        worktree = self.job_worktree(job)
+        commit = self._clean_head(worktree)
+        build_round = job.attempts.build
+
+        results: list[dict[str, Any]] = []
+        for argv in commands:
+            try:
+                result = runner(list(argv), cwd=worktree, timeout=timeout)
+            except ForgeFlowError as exc:  # e.g. the tool is not installed
+                results.append({"argv": list(argv), "ok": False, "error": str(exc)})
+                continue
+            results.append(
+                {
+                    "argv": list(argv),
+                    "ok": result.ok,
+                    "returncode": result.returncode,
+                    "timed_out": result.timed_out,
+                    "stdout_tail": redact_credentials(result.stdout[-_OUTPUT_TAIL:]),
+                    "stderr_tail": redact_credentials(result.stderr[-_OUTPUT_TAIL:]),
+                }
+            )
+        after = git_ok(worktree, "rev-parse", "HEAD", read_only=True)
+        dirty_after = porcelain_status(worktree)
+        unchanged = after == commit and not dirty_after
+        passed = unchanged and all(r["ok"] for r in results)
+        payload = {
+            "commit": commit,
+            "commands": results,
+            "worktree_unchanged": unchanged,
+            "changed_paths": dirty_after[:50],
+        }
+
+        def still_owned(current: Job) -> None:
+            if (
+                current.lease is None
+                or current.lease.token != lease_token
+                or current.state is not S.VERIFYING
+                or current.attempts.build != build_round
+            ):
+                raise LeaseError("the job changed hands or phase while its checks ran")
+
+        return self._record_evidence(
+            job_id,
+            "checks",
+            "passed" if passed else "failed",
+            payload,
+            mocked=False,
+            commit=commit,
+            check=still_owned,
+        )
+
+    @staticmethod
+    def _clean_head(worktree: Path) -> str:
+        dirty = porcelain_status(worktree)
+        if dirty:
+            raise InvalidTransitionError(
+                f"the worktree has {len(dirty)} uncommitted change(s); checks and delivery are "
+                "judged on a commit, so commit or discard them first"
+            )
+        return git_ok(worktree, "rev-parse", "HEAD", read_only=True)
 
     # --- worker leases ---------------------------------------------------------------------
 
@@ -599,30 +962,51 @@ class JobStore:
         return LeaseHandle(self, job_id, token, os_lock)
 
     def _set_worker_pid(self, job_id: str, token: str, pid: int | None) -> None:
+        started = process_started_at(pid) if pid else None
+
         def apply(job: Job) -> None:
             if job.lease is None or job.lease.token != token:
                 raise LeaseError("lease is no longer held")
             job.lease.worker_pid = pid
+            job.lease.worker_started_at = started
 
-        self._mutate(job_id, apply, "worker-pid", {"worker_pid": pid}, None)
+        self._mutate(
+            job_id, apply, "worker-pid", {"worker_pid": pid, "worker_started_at": started}, None
+        )
 
     def _release_lease(self, job_id: str, token: str) -> None:
-        def apply(job: Job) -> None:
+        with self._state_lock():
+            job = self.load(job_id)
             if job.lease is None or job.lease.token != token:
                 return
-            job.lease = None
-            if job.state in WORKER_STATES:
-                # Leaving a worker phase without finishing it is an interruption.
-                job.interrupted_from = job.state
-                job.state = S.INTERRUPTED
+            status = worker_status(job.lease)
+            if status in _WORKER_BLOCKING:
+                # The provider outlived its orchestrator's worker phase. Keep the lease record:
+                # acquire_lease() then refuses (stale lease) and recover() reports the orphan.
+                self._mutate_locked(
+                    job_id,
+                    lambda _: None,
+                    "lease-retained",
+                    {"worker_pid": job.lease.worker_pid, "worker_status": status},
+                    None,
+                )
+                return
 
-        self._mutate(job_id, apply, "lease-released", None, None)
+            def apply(current: Job) -> None:
+                current.lease = None
+                if current.state in WORKER_STATES:
+                    # Leaving a worker phase without finishing it is an interruption.
+                    current.interrupted_from = current.state
+                    current.state = S.INTERRUPTED
+
+            self._mutate_locked(job_id, apply, "lease-released", None, None)
 
     def recover(self, job_id: str) -> RecoveryReport:
         """Detect a worker that died and mark the job INTERRUPTED, preserving its worktree.
 
-        Refuses (without changes) while a worker is alive, while a recorded provider subprocess
-        still runs, or when the lease was taken on another host.
+        Refuses (without changes) while a worker is alive, while the recorded provider
+        subprocess still runs or cannot be told apart from a live process, or when the lease
+        was taken on another host.
         """
         job = self.load(job_id)
         if job.lease is None and job.state not in WORKER_STATES:
@@ -642,13 +1026,14 @@ class JobStore:
                         "foreign-host",
                         f"lease was taken on {lease.holder_host}; recover it there",
                     )
-                if lease is not None and lease.worker_pid and pid_alive(lease.worker_pid):
+                status = worker_status(lease)
+                if lease is not None and status in _WORKER_BLOCKING:
                     return RecoveryReport(
                         job_id,
                         "orphaned-worker",
-                        f"provider process {lease.worker_pid} is still running; stop it before "
-                        "recovering (if that PID now belongs to an unrelated process, use "
-                        "force_release_lease with a reason)",
+                        f"provider process {lease.worker_pid} is still running ({status}); stop "
+                        "it before recovering (if that PID now belongs to an unrelated process, "
+                        "use force_release_lease with a reason)",
                     )
 
                 def apply(job: Job) -> None:
@@ -659,7 +1044,7 @@ class JobStore:
 
                 lost = lease.to_dict() if lease else None
                 updated = self._mutate_locked(
-                    job_id, apply, "recovered", {"lost_lease": lost}, None
+                    job_id, apply, "recovered", {"lost_lease": lost, "worker_status": status}, None
                 )
             return RecoveryReport(
                 job_id,
@@ -670,7 +1055,11 @@ class JobStore:
             os_lock.release()
 
     def force_release_lease(self, job_id: str, reason: str) -> Job:
-        """Human override for a lease that fails closed (e.g. a reused PID). Audited."""
+        """Human override for a lease that fails closed (e.g. a reused PID). Audited.
+
+        Still refuses while the recorded provider process is verifiably alive (same PID and
+        start time): that is not a stale lease, and releasing it would allow a second writer.
+        """
         if not reason.strip():
             raise ValidationError("a reason is required to force-release a lease")
         os_lock = self._lease_lock(job_id)
@@ -679,18 +1068,33 @@ class JobStore:
         try:
 
             def apply(job: Job) -> None:
+                if job.lease is not None and worker_status(job.lease) == "running":
+                    raise LeaseError(
+                        f"provider process {job.lease.worker_pid} is verifiably still running; "
+                        "stop it first"
+                    )
                 job.lease = None
                 if job.state in WORKER_STATES:
                     job.interrupted_from = job.state
                     job.state = S.INTERRUPTED
 
-            return self._mutate(job_id, apply, "lease-force-released", {"reason": reason}, None)
+            return self._mutate(
+                job_id,
+                apply,
+                "lease-force-released",
+                {"reason": reason},
+                None,
+            )
         finally:
             os_lock.release()
 
 
 class LeaseHandle:
-    """Proof of worker ownership. Release it (or use ``with``) when the worker phase ends."""
+    """Proof of worker ownership. Release it (or use ``with``) when the worker phase ends.
+
+    Releasing while the recorded provider subprocess still runs keeps the lease record (the job
+    stays owned and needs recovery once the process is stopped).
+    """
 
     def __init__(self, store: JobStore, job_id: str, token: str, os_lock: fsutil.FileLock):
         self.store = store
@@ -734,4 +1138,6 @@ def _protected_fields(job: Job) -> tuple[Any, ...]:
         job.attempts.to_dict(),
         job.job_id,
         job.policy.to_dict(),
+        job.repo.to_dict(),
+        job.worktree.to_dict() if job.worktree else None,
     )

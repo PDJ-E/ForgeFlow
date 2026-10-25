@@ -1,8 +1,10 @@
 """Minimal GitHub linkage through the GitHub CLI (``gh``).
 
 Checkpoint A only *reads* GitHub: it verifies that an existing issue belongs to the job's
-repository and looks up the Project items that issue is on. It never creates issues, Projects,
-fields or labels, so the user's board stays the single source of truth (ADR 0001).
+repository, looks up the Project items that issue is on, and reads a pull request's state so
+the store can verify Gate B and record merges it actually observes. It never creates issues,
+PRs, Projects, fields or labels, so the user's board stays the single source of truth
+(ADR 0001).
 """
 
 from __future__ import annotations
@@ -12,7 +14,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from forgeflow.errors import GitHubError, GitHubScopeError, ToolNotFoundError, ValidationError
-from forgeflow.jobs import IssueLink, Job, ProjectItemLink
+from forgeflow.jobs import IssueLink, Job, ProjectItemLink, PullRequestObservation
 from forgeflow.proc import CommandResult, Runner, run_command
 from forgeflow.store import JobStore
 
@@ -37,6 +39,19 @@ query($owner: String!, $name: String!, $number: Int!) {
           }
         }
       }
+    }
+  }
+}
+"""
+
+
+_PULL_REQUEST_QUERY = """
+query($owner: String!, $name: String!, $number: Int!) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      number url state isDraft merged mergedAt
+      headRefName headRefOid baseRefName
+      headRepository { nameWithOwner }
     }
   }
 }
@@ -89,6 +104,30 @@ class GitHubClient:
             title=str(issue["title"]),
             state=str(issue["state"]),
         )
+
+    def view_pull_request(self, repo: str, number: int) -> PullRequestObservation:
+        """The pull request as GitHub reports it now (state, draft, merge, head commit)."""
+        owner, name = _split_slug(repo)
+        data = self._graphql(_PULL_REQUEST_QUERY, owner, name, number)
+        pr = (data.get("repository") or {}).get("pullRequest")
+        if not pr:
+            raise GitHubError(f"{repo}#{number} is not a pull request")
+        try:
+            return PullRequestObservation(
+                repo=repo,
+                number=int(pr["number"]),
+                url=str(pr["url"]),
+                state=str(pr["state"]),
+                is_draft=bool(pr["isDraft"]),
+                merged=bool(pr["merged"]),
+                merged_at=str(pr["mergedAt"]) if pr.get("mergedAt") else None,
+                head_ref=str(pr["headRefName"]),
+                head_sha=str(pr["headRefOid"]),
+                head_repo=(pr.get("headRepository") or {}).get("nameWithOwner"),
+                base_ref=str(pr["baseRefName"]),
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise GitHubError(f"unexpected pull request data for {repo}#{number}") from exc
 
     def issue_project_items(self, repo: str, number: int) -> list[ProjectItemLink]:
         """Project (v2) items for the issue. Needs the ``read:project`` token scope."""

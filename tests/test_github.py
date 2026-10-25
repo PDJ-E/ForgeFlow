@@ -98,6 +98,15 @@ class LiveGitHubTests(unittest.TestCase):
         with self.assertRaises(GitHubError):
             GitHubClient().view_issue("cli/cli", 1)  # cli/cli#1 is a pull request
 
+    def test_view_pull_request(self) -> None:
+        # The fields Gate B and record_merge rely on, as GitHub really returns them.
+        pr = GitHubClient().view_pull_request("cli/cli", 1)
+        self.assertEqual(pr.number, 1)
+        self.assertIn(pr.state, ("OPEN", "CLOSED", "MERGED"))
+        self.assertEqual(pr.merged, pr.state == "MERGED")
+        self.assertRegex(pr.head_sha, r"^[0-9a-f]{40}$")
+        self.assertTrue(pr.head_ref and pr.base_ref)
+
     def test_project_items_or_precise_scope_blocker(self) -> None:
         repo, number = self.target()
         try:

@@ -9,7 +9,7 @@ description = "Human-guided, multi-model AI software factory for Claude Code, Co
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
-requires-python = ">=3.10"
+requires-python = ">=3.13"  # keep in sync with forgeflow.MIN_PYTHON
 authors = [{ name = "Pedro de Jesus" }]
 dependencies = []  # standard library only
 classifiers = [
@@ -34,7 +34,7 @@ packages = ["forgeflow"]
 
 [tool.ruff]
 line-length = 100
-target-version = "py310"
+target-version = "py313"
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "B", "UP", "SIM", "S"]
@@ -48,9 +48,16 @@ ignore = [
 "tests/*" = ["S101", "S106", "S108", "B017", "SIM117"]
 
 [tool.mypy]
-python_version = "3.10"
+python_version = "3.13"
 strict = true
 files = ["forgeflow", "tests"]
 
-[tool.pytest.ini_options]
+[tool.pytest.ini_options]  # pytest is optional; the official runner is unittest
 testpaths = ["tests"]
+
+# Developer tools, never runtime dependencies. With pip 25.1+:
+#   py -3.13 -m pip install --user --group lint      (Windows; --user = this user only)
+#   python3.13 -m pip install --user --group lint    (elsewhere)
+[dependency-groups]
+lint = ["ruff==0.17.2", "mypy==2.4.0"]
+dev = [{ include-group = "lint" }, "pytest>=8"]

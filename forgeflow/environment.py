@@ -15,13 +15,13 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
+from forgeflow import MIN_PYTHON
 from forgeflow.errors import ForgeFlowError, ToolNotFoundError
 from forgeflow.gitrepo import discover_identity, git, porcelain_status
 from forgeflow.proc import CommandResult, Runner, run_command, which
 from forgeflow.providers import REAL_PROVIDERS, ProviderCapabilities
 from forgeflow.store import RUNTIME_RELATIVE, JobStore
 
-MIN_PYTHON = (3, 10)
 MIN_GIT = (2, 31)  # `git rev-parse --path-format=absolute`
 KNOWLEDGE_WORK_PLUGINS = ("engineering", "product-management", "data", "productivity")
 SKILL_ADAPTERS = {
@@ -73,20 +73,20 @@ def _try(runner: Runner, argv: list[str], timeout: float = 30) -> CommandResult 
 
 
 def check_python() -> Check:
-    version = sys.version_info[:3]
+    version = tuple(sys.version_info[:3])
     text = ".".join(str(v) for v in version)
+    data = {"version": text, "executable": sys.executable}
     if version[:2] < MIN_PYTHON:
-        return Check("python", ERROR, True, f"Python {text} is older than 3.10")
-    if version[:2] == (3, 10):
+        need = ".".join(str(v) for v in MIN_PYTHON)
         return Check(
             "python",
-            WARN,
+            ERROR,
             True,
-            f"Python {text} works, but 3.10 reaches end of life in October 2026; "
-            "3.12+ is recommended",
-            {"version": text},
+            f"Python {text} at {sys.executable} is older than {need}; on Windows run "
+            f"`py -{need} -m forgeflow`",
+            data,
         )
-    return Check("python", OK, True, f"Python {text}", {"version": text})
+    return Check("python", OK, True, f"Python {text} ({sys.executable})", data)
 
 
 def check_git(runner: Runner) -> Check:

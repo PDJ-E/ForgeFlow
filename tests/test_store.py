@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sys
 import unittest
 
 from forgeflow.errors import (
@@ -12,9 +13,10 @@ from forgeflow.errors import (
     StaleLeaseError,
     ValidationError,
 )
+from forgeflow.github import GitHubClient
 from forgeflow.jobs import Approval, Job, JobState, utc_now
 from forgeflow.store import JobStore
-from tests.support import GitRepoTestCase, run_git
+from tests.support import FakeGitHub, GitRepoTestCase, pull_request, run_git
 
 S = JobState
 
@@ -116,7 +118,7 @@ class TransitionGuardTests(GitRepoTestCase):
         job = self.approved_job()
         before = self.store.load(job.job_id)
         with self.assertRaisesRegex(InvalidTransitionError, "not allowed"):
-            self.store.transition(job.job_id, S.MERGED)
+            self.store.transition(job.job_id, S.VERIFYING)
         self.assertEqual(self.store.load(job.job_id).to_dict(), before.to_dict())
 
     def test_interrupted_cannot_be_set_directly(self) -> None:
@@ -161,37 +163,37 @@ class TransitionGuardTests(GitRepoTestCase):
         with self.assertRaises(LeaseError):
             self.store.transition(job.job_id, S.BUILDING, lease_token="forged")
 
-    def test_merge_requires_an_observed_github_merge(self) -> None:
+    def test_delivery_states_are_not_reachable_through_transition(self) -> None:
         job = self.ready_job()
-        with self.store.acquire_lease(job.job_id, "builder", "mock") as lease:
-            t = lease.token
-            self.store.transition(job.job_id, S.BUILDING, lease_token=t)
-            self.store.transition(job.job_id, S.VERIFYING, lease_token=t)
-            self.store.record_evidence(job.job_id, "checks", "passed", {}, mocked=True)
-            self.store.transition(job.job_id, S.REVIEWING, lease_token=t)
-            with self.assertRaisesRegex(InvalidTransitionError, "draft pull request"):
-                self.store.transition(job.job_id, S.AWAITING_MERGE_APPROVAL, lease_token=t)
-            self.link_draft_pr(job.job_id)
-            self.store.transition(job.job_id, S.AWAITING_MERGE_APPROVAL, lease_token=t)
-        for bad in (
-            None,
-            {"source": "agent", "pr_number": 42, "merged_at": "now"},
-            {"source": "github", "pr_number": 41, "merged_at": "now"},
-        ):
-            with self.subTest(bad=bad), self.assertRaises(InvalidTransitionError):
-                self.store.transition(job.job_id, S.MERGED, merge_observation=bad)
+        with self.assertRaisesRegex(InvalidTransitionError, "request_merge_approval"):
+            self.store.transition(job.job_id, S.AWAITING_MERGE_APPROVAL)
+        with self.assertRaisesRegex(InvalidTransitionError, "record_merge"):
+            self.store.transition(job.job_id, S.MERGED)
 
-    def test_failed_checks_block_merge_approval(self) -> None:
+    def test_gate_b_needs_a_linked_pr_and_passing_checks(self) -> None:
         job = self.ready_job()
-        self.link_draft_pr(job.job_id)
+        assert job.worktree is not None
         with self.store.acquire_lease(job.job_id, "builder", "mock") as lease:
             t = lease.token
             self.store.transition(job.job_id, S.BUILDING, lease_token=t)
             self.store.transition(job.job_id, S.VERIFYING, lease_token=t)
-            self.store.record_evidence(job.job_id, "checks", "failed", {}, mocked=True)
+            failing = ((sys.executable, "-c", "raise SystemExit(1)"),)
+            self.assertEqual(self.store.run_checks(job.job_id, t, failing).status, "failed")
             self.store.transition(job.job_id, S.REVIEWING, lease_token=t)
+            head = run_git(self.repo, "rev-parse", "HEAD")  # the worktree starts at main's HEAD
+            gh = GitHubClient(
+                runner=FakeGitHub(
+                    {},
+                    pull_requests={
+                        42: pull_request(42, head_ref=job.worktree.branch, head_sha=head)
+                    },
+                )
+            )
+            with self.assertRaisesRegex(InvalidTransitionError, "draft pull request"):
+                self.store.request_merge_approval(job.job_id, t, gh)
+            self.link_draft_pr(job.job_id)
             with self.assertRaisesRegex(InvalidTransitionError, "checks did not pass"):
-                self.store.transition(job.job_id, S.AWAITING_MERGE_APPROVAL, lease_token=t)
+                self.store.request_merge_approval(job.job_id, t, gh)
             self.store.transition(job.job_id, S.NEEDS_HUMAN, lease_token=t, reason="red CI")
 
     def test_rework_is_bounded(self) -> None:
@@ -294,15 +296,13 @@ class EvidenceTests(GitRepoTestCase):
     def test_evidence_is_written_and_flagged(self) -> None:
         job = self.new_job()
         item = self.store.record_evidence(
-            job.job_id,
-            "checks",
-            "passed",
-            {"commands": [["python", "-m", "unittest"]]},
-            mocked=True,
+            job.job_id, "review", "approve", {"findings": []}, mocked=True
         )
         stored = json.loads((self.store.job_dir(job.job_id) / item.path).read_text("utf-8"))
         self.assertTrue(stored["mocked"])
         self.assertEqual(self.store.load(job.job_id).evidence[0].path, item.path)
+        with self.assertRaisesRegex(ValidationError, "run_checks"):
+            self.store.record_evidence(job.job_id, "checks", "passed", {}, mocked=False)
 
     def test_evidence_kind_is_validated(self) -> None:
         job = self.new_job()

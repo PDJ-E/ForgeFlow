@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import unittest
@@ -49,7 +50,8 @@ def _task(**overrides: object) -> ProviderTask:
         branch="forge/ff-20261024-abcdef",
         base_sha="0" * 40,
         plan_path="docs/plan.md",
-        plan_sha256="1" * 64,
+        plan_sha256=hashlib.sha256(b"# Plan\n").hexdigest(),
+        plan_text="# Plan\n",
         acceptance_criteria=("works",),
         allowed_paths=("src/*",),
         allowed_operations=("read", "write"),
@@ -117,6 +119,7 @@ class TaskContractTests(unittest.TestCase):
             "backslash": dict(allowed_paths=("src\\*",)),
             "builder without paths": dict(allowed_paths=()),
             "zero timeout": dict(timeout_seconds=0),
+            "plan text not approved": dict(plan_text="# Another plan\n"),
         }
         for name, overrides in cases.items():
             with self.subTest(name), self.assertRaises(ValidationError):

@@ -12,7 +12,9 @@ provider may do is decided per task by ``ProviderTask.allowed_operations`` and t
 from __future__ import annotations
 
 import fnmatch
+import hashlib
 import json
+import os
 from abc import ABC, abstractmethod
 from dataclasses import asdict, dataclass, field
 from pathlib import Path, PurePosixPath
@@ -20,11 +22,11 @@ from typing import TYPE_CHECKING, Any
 
 from forgeflow import fsutil
 from forgeflow.errors import ProviderError, ToolNotFoundError, ValidationError
-from forgeflow.jobs import Job, Policy
+from forgeflow.jobs import Policy
 from forgeflow.proc import CommandResult, Runner, run_command, which
 
 if TYPE_CHECKING:
-    from forgeflow.store import LeaseHandle
+    from forgeflow.store import JobStore, LeaseHandle
 
 ROLES = ("builder", "reviewer")
 WRITE_OPERATIONS = frozenset({"write", "git-commit"})
@@ -49,8 +51,11 @@ class ProviderTask:
     worktree_path: str
     branch: str
     base_sha: str
-    plan_path: str
+    plan_path: str  # where the plan lives in the main checkout; for reference only
     plan_sha256: str
+    plan_text: (
+        str  # the approved plan itself, from the job's snapshot; never read it from a checkout
+    )
     acceptance_criteria: tuple[str, ...]
     allowed_paths: tuple[str, ...]  # glob patterns, repository-relative, '/' separated
     allowed_operations: tuple[str, ...]
@@ -78,10 +83,39 @@ class ProviderTask:
             raise ValidationError("a builder task must declare its allowed paths")
         if self.timeout_seconds <= 0 or self.max_attempts <= 0:
             raise ValidationError("timeout and attempts must be positive")
+        if hashlib.sha256(self.plan_text.encode("utf-8")).hexdigest() != self.plan_sha256:
+            raise ValidationError("the task's plan text is not the approved plan")
 
     def permits_path(self, rel_path: str) -> bool:
-        posix = PurePosixPath(rel_path.replace("\\", "/")).as_posix()
+        """True if ``rel_path`` is a plain repository-relative path inside an allowed pattern.
+
+        Paths are judged as written, never normalised: any empty, ``.`` or ``..`` segment,
+        absolute path, drive or stream (``:``) or ``.git`` segment is refused outright, so
+        ``src/*`` cannot reach ``src/../.github``. Segments are compared the way Windows reads
+        them, without trailing dots and spaces (``".. "`` is ``".."`` there).
+        """
+        parts = [p.rstrip(". ") for p in rel_path.replace("\\", "/").split("/")]
+        if ":" in rel_path or any(not p or p.lower() == ".git" for p in parts):
+            return False
+        posix = rel_path.replace("\\", "/")  # matched as written: "src./x" is not "src/x"
         return any(fnmatch.fnmatchcase(posix, pattern) for pattern in self.allowed_paths)
+
+    def permitted_target(self, rel_path: str) -> Path:
+        """The real file a write to ``rel_path`` would touch, if every check allows it.
+
+        Symlinks and junctions are resolved first and the resolved path must still be inside
+        the worktree and inside an allowed pattern.
+        """
+        if not self.permits_path(rel_path):
+            raise ValidationError(f"{rel_path!r} is outside the allowed paths")
+        root = Path(self.worktree_path)
+        target = fsutil.ensure_within(root, root / rel_path)
+        real_rel = Path(os.path.relpath(target, os.path.realpath(root))).as_posix()
+        if not self.permits_path(real_rel):
+            raise ValidationError(
+                f"{rel_path!r} resolves to {real_rel!r}, outside the allowed paths"
+            )
+        return target
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -308,11 +342,11 @@ class MockProvider(Provider):
             raise ProviderError("mock reviewer attempted to write")
         if self.writes and "write" not in task.allowed_operations:
             raise ProviderError("task does not allow writes")
-        root = Path(task.worktree_path)
         for rel, content in self.writes.items():
-            if not task.permits_path(rel):
-                raise ProviderError(f"mock write to {rel!r} is outside the allowed paths")
-            target = fsutil.ensure_within(root, root / rel)
+            try:
+                target = task.permitted_target(rel)
+            except ValidationError as exc:
+                raise ProviderError(f"mock write refused: {exc}") from exc
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(content, encoding="utf-8")
         return ProviderResult(
@@ -329,7 +363,8 @@ class MockProvider(Provider):
 
 
 def build_task(
-    job: Job,
+    store: JobStore,
+    job_id: str,
     *,
     role: str,
     acceptance_criteria: tuple[str, ...],
@@ -339,6 +374,7 @@ def build_task(
     timeout_seconds: int = 1800,
 ) -> ProviderTask:
     """Derive a task from the job record so the approved plan and worktree cannot drift."""
+    job = store.load(job_id)
     if job.worktree is None:
         raise ValidationError("the job has no worktree")
     if job.plan.path is None or job.plan.approval is None:
@@ -357,6 +393,7 @@ def build_task(
         base_sha=job.worktree.base_sha,
         plan_path=job.plan.path,
         plan_sha256=job.plan.approval.subject_sha256,
+        plan_text=store.approved_plan_text(job),
         acceptance_criteria=acceptance_criteria,
         allowed_paths=allowed_paths,
         allowed_operations=operations,

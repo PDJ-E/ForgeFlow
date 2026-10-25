@@ -8,12 +8,13 @@ from __future__ import annotations
 
 import re
 import secrets
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from enum import Enum
+from dataclasses import asdict, dataclass, field
+from datetime import UTC, datetime
+from enum import StrEnum
 from typing import Any
 
 from forgeflow.errors import ValidationError
+from forgeflow.proc import redact_credentials
 
 SCHEMA_VERSION = 1
 DEFAULT_MAX_REWORK = 2
@@ -24,7 +25,7 @@ _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _PROVIDER_NAME = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
 
 
-class JobState(str, Enum):
+class JobState(StrEnum):
     DRAFT = "draft"  # discovery/design only; can never dispatch code (AC-02)
     AWAITING_PLAN_APPROVAL = "awaiting_plan_approval"
     PLAN_APPROVED = "plan_approved"  # Gate A passed
@@ -71,11 +72,11 @@ REWORK_SOURCES = frozenset({S.VERIFYING, S.REVIEWING, S.AWAITING_MERGE_APPROVAL}
 
 
 def utc_now() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+    return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
 
 def new_job_id(now: datetime | None = None) -> str:
-    stamp = (now or datetime.now(timezone.utc)).strftime("%Y%m%d")
+    stamp = (now or datetime.now(UTC)).strftime("%Y%m%d")
     return f"ff-{stamp}-{secrets.token_hex(3)}"
 
 
@@ -123,6 +124,11 @@ def _non_negative(value: int, where: str) -> int:
     return value
 
 
+def _redacted(url: str | None) -> str | None:
+    # Older records may hold a remote with embedded credentials; never load or re-save them.
+    return redact_credentials(url) if url else url
+
+
 # --- nested records ----------------------------------------------------------------------------
 
 
@@ -149,7 +155,7 @@ class Repo:
         return cls(
             root=_get(d, "root", str, where),
             slug=slug,
-            remote_url=_get(d, "remote_url", str, where, optional=True),
+            remote_url=_redacted(_get(d, "remote_url", str, where, optional=True)),
             base_branch=_get(d, "base_branch", str, where),
         )
 
@@ -422,6 +428,8 @@ class Lease:
     holder_host: str
     acquired_at: str
     worker_pid: int | None = None  # the provider subprocess, once spawned
+    # Its OS start time, so a reused PID is not mistaken for it (see proc.process_started_at).
+    worker_started_at: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -432,6 +440,7 @@ class Lease:
             "holder_host": self.holder_host,
             "acquired_at": self.acquired_at,
             "worker_pid": self.worker_pid,
+            "worker_started_at": self.worker_started_at,
         }
 
     @classmethod
@@ -444,6 +453,7 @@ class Lease:
             holder_host=_get(d, "holder_host", str, where),
             acquired_at=_get(d, "acquired_at", str, where),
             worker_pid=_get(d, "worker_pid", int, where, optional=True),
+            worker_started_at=_get(d, "worker_started_at", int, where, optional=True),
         )
 
 
@@ -454,6 +464,8 @@ class Evidence:
     status: str  # e.g. "passed", "failed", "succeeded", "recorded"
     mocked: bool  # True when produced by a mock provider or fixture, never by a real run
     created_at: str
+    build_round: int = 0  # attempts.build when recorded: evidence from older rounds is stale
+    commit: str | None = None  # for "checks": the worktree commit the commands ran against
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -462,6 +474,8 @@ class Evidence:
             "status": self.status,
             "mocked": self.mocked,
             "created_at": self.created_at,
+            "build_round": self.build_round,
+            "commit": self.commit,
         }
 
     @classmethod
@@ -472,7 +486,29 @@ class Evidence:
             status=_get(d, "status", str, where),
             mocked=_get(d, "mocked", bool, where),
             created_at=_get(d, "created_at", str, where),
+            build_round=_get(d, "build_round", int, where, optional=True) or 0,
+            commit=_get(d, "commit", str, where, optional=True),
         )
+
+
+@dataclass(frozen=True)
+class PullRequestObservation:
+    """A pull request as GitHub reported it just now. Built only from a ``gh`` response."""
+
+    repo: str
+    number: int
+    url: str
+    state: str  # OPEN | CLOSED | MERGED
+    is_draft: bool
+    merged: bool
+    merged_at: str | None
+    head_ref: str
+    head_sha: str
+    head_repo: str | None  # None when the head repository was deleted
+    base_ref: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
 
 
 @dataclass
@@ -533,6 +569,9 @@ class Job:
         if state is S.INTERRUPTED and interrupted_from not in WORKER_STATES:
             raise ValidationError("job.interrupted_from must name a worker state when interrupted")
         worktree = _obj(d, "worktree", "job", optional=True)
+        job_id = validate_job_id(_get(d, "job_id", str, "job"))
+        if worktree and worktree.get("branch") != branch_for(job_id):
+            raise ValidationError(f"job.worktree.branch must be {branch_for(job_id)}")
         lease = _obj(d, "lease", "job", optional=True)
         evidence = _get(d, "evidence", list, "job", optional=True) or []
         parsed_evidence = []
@@ -544,7 +583,7 @@ class Job:
         if not title.strip():
             raise ValidationError("job.title must not be empty")
         return cls(
-            job_id=validate_job_id(_get(d, "job_id", str, "job")),
+            job_id=job_id,
             title=title,
             state=state,
             repo=Repo.from_dict(_obj(d, "repo", "job")),
