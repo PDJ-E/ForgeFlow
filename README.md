@@ -59,6 +59,7 @@ Potential operations include exploring ideas, designing solutions, approving pla
 - [ADR 0002 — Optional knowledge sources and Obsidian](docs/decisions/0002-knowledge-sources-obsidian.md)
 - [MVP v0.1 scope and acceptance criteria](docs/mvp-scope.md)
 - [Development roadmap](docs/roadmap.md)
+- [Changelog and release history](CHANGELOG.md)
 - [Third-party references and attribution](ATTRIBUTION.md)
 
 The first implementation target is [MVP v0.1](docs/mvp-scope.md): a bounded, auditable idea-to-human-reviewed-PR workflow, plus optional project-scoped Markdown knowledge access. It must be built and verified through small checkpoints in a **disposable test repository and vault**. The user's working Obsidian MCP setup is an existing external tool, not a bundled ForgeFlow integration. Only after testing should ForgeFlow be trialed on an actual project.
