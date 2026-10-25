@@ -45,6 +45,14 @@ The first complete implementation target is **[MVP v0.1](mvp-scope.md)**. Work s
 - [ ] Limit repair rounds, keep evidence and escalate unresolved risks
 - [ ] Produce a draft PR; Gate B requires owner approval for merge
 - [ ] Prove interrupted-job recovery without duplicate workers or lost changes
+- [ ] ForgeFlow owns Project Status transitions, driven only by verified job events:
+  - **Ready → Building → QA → Review → Done**, with **Blocked** for exceptions. The Project's own status-changing workflows are disabled by the owner (2026-10-25), so there is one source of these transitions and no competing automation.
+  - **Building:** when a builder is dispatched (job enters `building`). Starting work never closes the issue.
+  - **QA:** deterministic checks are running or recorded for the current build round (`verifying`).
+  - **Review:** review and Gate B, i.e. a draft PR whose head is the validated commit (`reviewing`, `awaiting_merge_approval`).
+  - **Done:** only after `record_merge` observes on GitHub the merge of that PR with the validated head commit, never on an agent's or reviewer's claim.
+  - **Blocked:** `needs_human`, exhausted rework or an unresolved risk. The item returns to its previous status when the job resumes.
+  - One mapping from job state to Status lives in the store's transition side effects, not in adapters or separate rules. Each write is idempotent and re-reads the item, as the Checkpoint B handoff does. GitHub Projects stays the authoritative board for approved work; ForgeFlow keeps no competing local board.
 
 ### Checkpoint D — Optional Knowledge Management
 
