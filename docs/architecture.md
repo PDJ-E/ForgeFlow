@@ -16,6 +16,7 @@ ForgeFlow is a human-governed, multi-model software engineering workflow. It sho
 7. **A local observability dashboard is optional, not an MVP prerequisite.** Introduce one only if GitHub Projects and local diagnostic commands fail to answer recurring operational questions.
 8. **Human approval is mandatory for merge.** Deployment is a separate, explicitly authorized concern; a successful review or PR does not authorize production deployment.
 9. **Continuous improvement is proposal-driven.** Lessons are drawn from verified problems, recurring review findings, and corrections. Changes to shared skills, policies, or agent instructions require review and approval.
+10. **Knowledge Management is an optional, provider-neutral integration.** A project may link to its own Markdown directory and/or existing Obsidian MCP tools; the vault remains user-owned, independent of ForgeFlow. Scoped reads and explicitly approved, conflict-checked writing are required. See [ADR 0002](decisions/0002-knowledge-sources-obsidian.md).
 
 ## Proposed workflow
 
@@ -57,7 +58,7 @@ The factory must distinguish **approving a plan** from **approving the actual PR
 | Approved feature backlog and workflow status | GitHub Projects + Issues |
 | Source history, review, integration | Git branches, commits, PRs, required CI |
 | Agent execution state, logs, usage, transient evidence | Local runtime files (schema TBD) |
-| Long-lived knowledge | Project docs; optional user-approved Obsidian synchronization |
+| Long-lived knowledge | User-owned Markdown knowledge sources (including Obsidian), with source attribution and project-scoped permissions; code-critical docs stay in the repository |
 | Provider credentials | Host environment/secret managers; never repo files |
 
 A durable cross-system identifier should link approved plans, GitHub Issues, runs, and PRs. Avoid bidirectional synchronization that creates conflicting owners.
@@ -80,6 +81,20 @@ A durable cross-system identifier should link approved plans, GitHub Issues, run
 - Escalate material auth, finance, privacy, migration, deployment, and architectural contract changes.
 - Avoid silently bypassing CI because runners or budgets are unavailable.
 
+## Knowledge Management (optional)
+
+Knowledge Management is a lightweight cross-cutting capability, **not** a mandatory Obsidian service. Project software requirements, interfaces and operation-critical docs remain in the repository; investigations, experiments, historical rationale and reusable knowledge can live in the user's independent vault. Content ownership never transfers to ForgeFlow.
+
+- Register an explicit `project_id` → repository and authorized knowledge source mapping; keep machine-specific paths and secrets local.
+- Begin with a scoped Markdown filesystem adapter. Existing Obsidian MCP connectivity is an optional source adapter, not required for core functionality or automatic setup.
+- Treat retrieved notes as untrusted references; identify provenance/freshness and reconcile conflicts using the appropriate authoritative source.
+- Limit all reads/writes to approved roots where enforceable. A preconfigured global MCP tool may still expose the entire vault, so never assume project-level scoping is automatically provided by MCP.
+- Present a concrete, reviewable diff, obtain human approval and perform a fresh version/hash check before applying a recoverable note update.
+- Avoid automatic full-vault synchronization, duplication of repository documentation and documentation churn on every task.
+- A tested sandbox uses the existing `MarkusPfundstein/mcp-obsidian` bridge with Obsidian's Local REST API with MCP; assess the native MCP endpoint as a later optional alternative.
+
+See [ADR 0002](decisions/0002-knowledge-sources-obsidian.md) for the boundaries and [MVP v0.1 scope](mvp-scope.md) for acceptance criteria.
+
 ## Documentation tools
 
 Use Context7 or official version-specific documentation only where external SDK/library behavior warrants it, with a fallback when Context7 is not installed. Read local source and existing ADRs for project-owned behavior.
@@ -97,5 +112,6 @@ These are intentionally **not settled**:
 7. What is the minimum credible cross-provider review contract and escalation policy?
 8. What conditions should trigger collection of learning proposals, and how will changes be evaluated before adoption?
 9. What is the smallest end-to-end pilot that demonstrates value without touching production services?
+10. How will the selected knowledge adapter enforce directory-scoped reads/writes when the host already exposes an unrestricted Obsidian MCP server?
 
-See [roadmap](roadmap.md) for the proposed sequencing. Do not resolve these by assumption in a generative build prompt; verify and record decisions in ADRs or Issues.
+See the [MVP v0.1 scope](mvp-scope.md) and [roadmap](roadmap.md) for agreed boundaries and sequencing. Do not resolve open questions by assumption in a generative build prompt; verify and record decisions in ADRs or Issues.
