@@ -9,7 +9,8 @@ Layout (inside the main checkout, self-ignored by git)::
             job.json          current snapshot (atomic replace, revisioned)
             events.jsonl      append-only audit trail of changes and decisions
             lease.lock        OS lock held by the live worker process for the job
-            plans/<sha256>.md byte-exact snapshot of each submitted plan; builders get this text
+            plans/v<N>.md     byte-exact snapshot of plan version N (hash in job.json); builders
+                              get this text. Older jobs may have plans/<sha256>.md instead.
             evidence/         machine-readable results (checks, provider output, reviews)
 
 Concurrency model:
@@ -163,7 +164,12 @@ class JobStore:
     def _events_file(self, job_id: str) -> Path:
         return self.job_dir(job_id) / "events.jsonl"
 
-    def _plan_snapshot(self, job_id: str, digest: str) -> Path:
+    def _plan_snapshot(self, job_id: str, version: int) -> Path:
+        # Short names keep deep repositories under Windows MAX_PATH; the hash lives in job.json.
+        return self.job_dir(job_id) / "plans" / f"v{version}.md"
+
+    def _legacy_plan_snapshot(self, job_id: str, digest: str) -> Path:
+        # Snapshots written before plan versions had files of their own were named by hash.
         return self.job_dir(job_id) / "plans" / f"{digest}.md"
 
     def _lease_lock(self, job_id: str) -> fsutil.FileLock:
@@ -237,17 +243,25 @@ class JobStore:
         except FileNotFoundError as exc:
             raise InvalidTransitionError(f"plan document {job.plan.path} is missing") from exc
 
-    def plan_snapshot_text(self, job_id: str, digest: str) -> str:
-        """A submitted plan's byte-exact snapshot, verified against its hash, as UTF-8 text."""
-        try:
-            data = self._plan_snapshot(job_id, digest).read_bytes()
-        except FileNotFoundError as exc:
-            raise InvalidTransitionError(
-                "the plan snapshot is missing; resubmit the plan for approval"
-            ) from exc
-        if hashlib.sha256(data).hexdigest() != digest:
-            raise InvalidTransitionError("the plan snapshot was modified")
-        return data.decode("utf-8")
+    def plan_snapshot_text(self, job_id: str, digest: str, version: int | None) -> str:
+        """A submitted plan's byte-exact snapshot, verified against its hash, as UTF-8 text.
+
+        The snapshot is ``plans/v<version>.md``. Only when that file does not exist (or the
+        version is unknown, as in records older than plan versions) is the earlier
+        ``plans/<sha256>.md`` name read. A ``v<version>.md`` that does not match its hash is
+        refused outright, never replaced by another file.
+        """
+        candidates = [self._plan_snapshot(job_id, version)] if version else []
+        candidates.append(self._legacy_plan_snapshot(job_id, digest))
+        for path in candidates:
+            try:
+                data = path.read_bytes()
+            except FileNotFoundError:
+                continue
+            if hashlib.sha256(data).hexdigest() != digest:
+                raise InvalidTransitionError(f"the plan snapshot {path.name} was modified")
+            return data.decode("utf-8")
+        raise InvalidTransitionError("the plan snapshot is missing; resubmit the plan for approval")
 
     def plan_digest(self, job: Job) -> str:
         """sha256 of the plan file in the main checkout as it is on disk right now."""
@@ -258,7 +272,9 @@ class JobStore:
         approval = job.plan.approval
         if approval is None or approval.gate != "plan":
             raise InvalidTransitionError("Gate A: the plan has not been approved")
-        return self.plan_snapshot_text(job.job_id, approval.subject_sha256)
+        return self.plan_snapshot_text(
+            job.job_id, approval.subject_sha256, approval.subject_version
+        )
 
     # --- creation and generic mutation -----------------------------------------------------
 
@@ -533,7 +549,10 @@ class JobStore:
             except UnicodeDecodeError as exc:
                 raise ValidationError(f"plan document {rel.as_posix()} is not UTF-8") from exc
             job.plan.sha256 = hashlib.sha256(data).hexdigest()
-            fsutil.atomic_write_bytes(self._plan_snapshot(job.job_id, job.plan.sha256), data)
+            # Versions only grow and job.json still records the previous one, so a v<N>.md that
+            # already exists was left by a submission that crashed before it was recorded;
+            # nothing refers to it. Recorded snapshots (older versions) are never written again.
+            fsutil.atomic_write_bytes(self._plan_snapshot(job.job_id, job.plan.version), data)
             job.state = S.AWAITING_PLAN_APPROVAL
 
         details: dict[str, Any] = {"plan": rel.as_posix(), "reason": reason}
@@ -688,7 +707,8 @@ class JobStore:
                     "Gate A: the approval does not match the submitted plan version, or the "
                     "plan changed after submission; resubmit it for approval"
                 )
-            self.plan_snapshot_text(job.job_id, current)  # the snapshot must be intact too
+            # The snapshot must be intact too.
+            self.plan_snapshot_text(job.job_id, current, job.plan.version)
 
         if target is S.DRAFT and source is S.PLAN_APPROVED:
             # Revoking an approval is safe only while nothing was built or published from it.

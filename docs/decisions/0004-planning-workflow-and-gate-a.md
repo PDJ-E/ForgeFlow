@@ -27,7 +27,7 @@ The constraints are local single-user software on Windows first, stdlib-only Pyt
 - no `TODO(forgeflow)` placeholders;
 - at most 60,000 characters, because GitHub caps issue bodies at 65,536.
 
-`design submit` pins the exact bytes as plan **version** *n* (`plan.version`, snapshot `plans/<sha256>.md`). Resubmitting supersedes a pending version. `design revise` withdraws a submitted or approved version to `draft`. Revising an approved plan (`plan_approved -> draft`, a new transition) is allowed only before anything was published or a worktree exists, and it needs a reason.
+`design submit` pins the exact bytes as plan **version** *n* (`plan.version`, snapshot `plans/v<n>.md`; the full sha256 is recorded in `job.json`, the approval and the event log, and every read re-hashes the file). Resubmitting supersedes a pending version. `design revise` withdraws a submitted or approved version to `draft`. Revising an approved plan (`plan_approved -> draft`, a new transition) is allowed only before anything was published or a worktree exists, and it needs a reason.
 
 ### Gate A: a human at an interactive console
 
@@ -102,7 +102,7 @@ Claude Code 2.1.310 and Codex CLI 0.164.0 on Windows 11, with a disposable repos
 - GitHub Project workflows ("Item added to project", "Item closed") run after ForgeFlow and can change the Status it set. ForgeFlow never overrides a Status it finds already set, and it reports the Status it observes. After the live test, the owner disabled all seven built-in workflows on ForgeFlow Development (verified 2026-10-25). From Checkpoint C on, ForgeFlow alone moves Status (Ready → Building → QA → Review → Done, Blocked for exceptions) from verified job events; see the [roadmap](../roadmap.md).
 - In the issue footer, ForgeFlow links the Project by its URL, because GitHub turns "#N" into a link to issue or pull request N. `design check` warns when a plan writes "Project #N".
 - Approval needs a real terminal, which is the intended friction. A Claude Code `!` command or any agent tool call cannot approve.
-- Windows `MAX_PATH`: a plan snapshot's path includes a 64-character hash, so a repository nested very deep (about 150 characters of root path or more) can exceed 260 characters unless Windows long paths are enabled.
+- Windows `MAX_PATH`: snapshots were first named `plans/<sha256>.md`. With mkstemp's temporary name that file needed about 140 characters below the repository root, which broke repositories nested deeper than about 120 characters. Snapshots are now `plans/v<n>.md` (amended 2026-10-26), so roots up to about 185 characters work without long paths. Deeper paths fail with a `PathTooLongError` before anything is written or replaced. Existing `plans/<sha256>.md` snapshots are still read, and verified, when no `v<n>.md` exists. A `v<n>.md` that does not match its hash is refused, never bypassed through the older name.
 
 ## Revisit
 

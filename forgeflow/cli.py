@@ -527,7 +527,7 @@ def _approve(start: Path, args: argparse.Namespace) -> int:
         summary: list[str] = []
         if job.plan.sha256:
             try:
-                text = store.plan_snapshot_text(job.job_id, job.plan.sha256)
+                text = store.plan_snapshot_text(job.job_id, job.plan.sha256, job.plan.version)
                 summary = design.check_text(text).summary_lines()
             except ForgeFlowError:
                 summary = []

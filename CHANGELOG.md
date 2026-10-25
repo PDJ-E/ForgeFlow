@@ -52,6 +52,11 @@ All the above documentation was introduced as the project's initial foundation i
 - Jobs started by discovery have no builder (`unassigned`), and no worker lease can be taken for them until a builder is assigned (Checkpoint C).
 - The `/forge` and `$forge` adapters cover the planning workflow, share one command table (checked by a test) and never run `approve`.
 
+### Fixed
+
+- Repositories nested deep on Windows no longer fail when a plan is submitted. Plan snapshots are now named `plans/v1.md`, `plans/v2.md`, … instead of by their 64-character hash. The full sha256 is still recorded and re-verified on every read, and existing hash-named snapshots keep working. Roots up to about 185 characters work without Windows long paths; deeper paths stop with a clear "path too long" error before anything is written.
+- `forgeflow handoff --dry-run` on a plan that was already handed off no longer claims it would create a new issue.
+
 ### Security
 
 - Gate A can no longer be passed through the library: `transition()` refuses `plan_approved`, and only approvals captured by `forgeflow approve` at an interactive console (Windows `GetConsoleMode` on both stdin and stdout, which also rejects `NUL`) are accepted, then re-checked at handoff, `ready` and every dispatch. Agent tool calls in Claude Code and Codex were verified to be refused. The limits of this local protection are documented in ADR 0004.

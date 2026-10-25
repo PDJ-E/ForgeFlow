@@ -165,7 +165,8 @@ def approve_plan(store: JobStore, job_id: str, context: ApprovalContext | None =
             f"the plan file changed after version {job.plan.version} was submitted; review "
             f"and resubmit it (forgeflow design submit {job_id}). Nothing was approved."
         )
-    text = store.plan_snapshot_text(job_id, digest)  # show exactly what will be approved
+    # Show exactly what will be approved.
+    text = store.plan_snapshot_text(job_id, digest, job.plan.version)
     shown_revision = job.revision
 
     rule = "=" * 78

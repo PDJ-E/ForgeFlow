@@ -127,7 +127,7 @@ It prints the plan, its version and sha256, the target repository and its visibi
 - **Codex skills:** Codex reads skills from `~/.agents/skills` (user) and `<repo>/.agents/skills`. Adapted copies of Anthropic's skills there (for example `pm-brainstorm`, `eng-system-design`) are recognised by the `source-package` / `source-skill` provenance in their `SKILL.md`; `forgeflow skills --host codex` lists them with the `$name` to invoke. Verified 2026-10-25: `$forge idea` loaded `$pm-brainstorm`.
 - **Codex on Windows:** with `[windows] sandbox = "elevated"` in `~/.codex/config.toml`, Codex runs commands as the local user `CodexSandboxOffline`, which cannot read a Python installed only for your user. `$forge` then cannot run ForgeFlow at all. Set `sandbox = "unelevated"` in your Codex configuration or start Codex with `-c 'windows.sandbox="unelevated"'` (both verified), or install Python 3.13 for all users to keep the elevated sandbox. ForgeFlow does not change your Codex configuration. `init` and `handoff` need network access, which Codex's sandbox may block; run them in your own terminal (approval already performs the handoff).
 - **Project automations:** GitHub Project workflows run after ForgeFlow and can change an item's Status. On ForgeFlow Development the "Item closed" workflow moved the closed test item to `Building`, so all built-in workflows there are now disabled. Disable status-changing workflows on any Project ForgeFlow manages; from Checkpoint C ForgeFlow sets Building, QA, Review, Done and Blocked itself. `forgeflow handoff` reports the Status it observes on each run.
-- **Windows path length:** plan snapshots are named by their 64-character hash. If the repository's path is very long (roughly 150+ characters), enable Windows long paths or use a shorter location.
+- **Windows path length:** without long-path support, Windows allows 259 characters per path. The longest name ForgeFlow writes in a job directory is about 72 characters below the repository root, so roots up to about **185 characters** work (tested). If a path does not fit, the command stops with `cannot write …: the path needs N characters …. Nothing was written.` Enable long paths (`LongPathsEnabled`) or move the repository to a shorter location.
 
 ## Running the tests
 
@@ -188,7 +188,7 @@ ForgeFlow never installs or upgrades these itself. CI installs the same `lint` g
 <repo>/.forge/runtime/config.json                  bound GitHub Project (forgeflow init)
 <repo>/.forge/runtime/jobs/<job-id>/discovery.json outcomes of the idea discussion (never published)
 <repo>/.forge/runtime/jobs/<job-id>/plan.md        the job's plan, edited during design
-<repo>/.forge/runtime/jobs/<job-id>/plans/        byte-exact snapshots of submitted plan versions
+<repo>/.forge/runtime/jobs/<job-id>/plans/vN.md   byte-exact snapshot of plan version N (its sha256 is in job.json)
 <repo>/.forge/runtime/jobs/<job-id>/evidence/     machine-readable results
 <repo>/.forge/worktrees/<job-id>/                  isolated worktree on branch forge/<job-id>
 ```

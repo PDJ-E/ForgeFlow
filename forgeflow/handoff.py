@@ -107,6 +107,11 @@ def describe(
             "recording the approval only: no GitHub Project is configured, so nothing is "
             "published until `forgeflow init --project N` and `forgeflow handoff` run"
         ]
+    if job.github.issue is not None:
+        return [
+            f"nothing new: the plan is already on issue #{job.github.issue.number} "
+            f"({job.github.issue.url}); handoff only re-checks it and finishes its Project item"
+        ]
     where = f"GitHub issue #{link_number} (as a comment)" if link_number else "a NEW GitHub issue"
     target_line = f"in {job.repo.slug}"
     status = f"Status '{binding.ready_status}'"

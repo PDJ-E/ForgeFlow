@@ -82,6 +82,16 @@ class HandoffTests(GitRepoTestCase):
         self.assertIn(f"[ForgeFlow Development]({PROJECT_URL})", footer)
         self.assertNotRegex(footer, r"#\d")  # nothing GitHub would auto-link to an issue/PR
 
+    def test_preview_of_a_handed_off_plan_promises_nothing_new(self) -> None:
+        from forgeflow.handoff import describe
+
+        job = self.approved()
+        self.assertIn("a NEW GitHub issue", describe(job, BINDING, self.client, None)[0])
+        job = self.run_handoff(job)
+        lines = describe(job, BINDING, self.client, None)
+        self.assertEqual(len(lines), 1)
+        self.assertIn("already on issue #1", lines[0])
+
     def test_rerun_is_idempotent(self) -> None:
         job = self.approved()
         self.run_handoff(job)
