@@ -41,6 +41,13 @@ Super Board credits other open-source projects, including:
 
 These projects are not currently ForgeFlow dependencies. If we add them, we will review the exact version and corresponding notices.
 
+## Optional Obsidian integration references
+
+- [Markus Pfundstein — mcp-obsidian](https://github.com/MarkusPfundstein/mcp-obsidian) — MIT. The user's already installed external MCP bridge for vault read/write operations; ForgeFlow v0.1 plans optional read-only integration, not redistribution of its source.
+- [Adam Coddington — Local REST API with MCP](https://github.com/coddingtonbear/obsidian-local-rest-api) — MIT. Obsidian community plugin v5.5.2 used in the temporary test vault. It exposes both a REST API and a native MCP endpoint; native MCP support remains an optional future implementation path.
+
+These are external tools in the user's environment, **not bundled ForgeFlow dependencies**. Preserve their own license notices if code/assets are ever vendored; do not imply endorsement.
+
 ## Rules for future contributions
 
 1. Prefer original implementation from independently written design specifications.
