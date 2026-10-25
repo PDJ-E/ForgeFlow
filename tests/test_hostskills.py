@@ -72,19 +72,74 @@ class HostSkillsTests(unittest.TestCase):
             home / "plugins" / "cache" / "claude-plugins-official" / "engineering" / "1.0",
             "architecture",
         )
-        found = hostskills.codex_skills(home)
+        found = hostskills.codex_skills(home, user_home=self.tmp)
         self.assertEqual(found.enabled(), ["engineering"])
         self.assertEqual(found.skills_for("design"), ["engineering:architecture"])
         self.assertEqual(found.skills_for("idea"), [])
+
+    def test_codex_user_skill_folders_are_recognised_by_provenance(self) -> None:
+        home = self.tmp / "codex"
+        home.mkdir()
+        (home / "config.toml").write_text('model = "x"\n', encoding="utf-8")
+        user = self.tmp / "user"
+        skills = user / ".agents" / "skills"
+
+        def adapted(folder: str, package: str, source: str) -> None:
+            (skills / folder).mkdir(parents=True)
+            (skills / folder / "SKILL.md").write_text(
+                f"---\nname: {folder}\ndescription: x\nmetadata:\n"
+                f"  source-package: {package}\n  source-version: 1.2.0\n"
+                f"  source-skill: {source}\n---\n# body\n",
+                encoding="utf-8",
+            )
+
+        adapted("pm-brainstorm", "Product Management-1.2.0-v40", "product-brainstorming")
+        adapted("eng-system-design", "Engineering-1.2.0-v41", "system-design")
+        adapted("my-notes", "Someone Else-0.1", "notes")  # not a Knowledge Work plugin
+        (skills / "plain").mkdir()
+        (skills / "plain" / "SKILL.md").write_text("---\nname: plain\n---\n", encoding="utf-8")
+
+        found = hostskills.codex_skills(home, user_home=user)
+        self.assertEqual(sorted(found.enabled()), ["engineering", "product-management"])
+        self.assertEqual(found.skills_for("idea"), ["$pm-brainstorm"])
+        self.assertEqual(found.canonical_for("idea"), ["product-management:product-brainstorming"])
+        self.assertEqual(found.skills_for("design"), ["$eng-system-design"])
+        self.assertFalse(found.to_dict()["fallback"])
+        self.assertIn(
+            "$pm-brainstorm (product-management:product-brainstorming)", hostskills.render(found)
+        )
+
+        # A repository-level copy takes precedence over the user-level one.
+        repo = self.tmp / "repo"
+        (repo / ".agents" / "skills" / "team-brainstorm").mkdir(parents=True)
+        (repo / ".agents" / "skills" / "team-brainstorm" / "SKILL.md").write_text(
+            "---\nname: team-brainstorm\nmetadata:\n  source-package: Product Management-1.3.0\n"
+            "  source-skill: product-brainstorming\n---\n",
+            encoding="utf-8",
+        )
+        found = hostskills.codex_skills(home, user_home=user, repo_root=repo)
+        self.assertEqual(found.skills_for("idea"), ["$team-brainstorm"])
+
+    def test_package_names_map_to_plugins(self) -> None:
+        for package, plugin in (
+            ("Product Management-1.2.0-v40", "product-management"),
+            ("Engineering-1.2.0-v41", "engineering"),
+            ("Productivity-1.3.1-v41", "productivity"),
+            ("Engineering", "engineering"),
+        ):
+            with self.subTest(package):
+                self.assertEqual(hostskills.plugin_of_package(package), plugin)
 
     def test_codex_without_plugins_falls_back(self) -> None:
         home = self.tmp / "codex"
         home.mkdir()
         (home / "config.toml").write_text('model = "x"\n', encoding="utf-8")
-        found = hostskills.codex_skills(home)
+        found = hostskills.codex_skills(home, user_home=self.tmp)
         self.assertEqual(found.plugins, {})
         self.assertIn("built-in guidance", hostskills.render(found))
-        self.assertEqual(hostskills.codex_skills(self.tmp / "missing").status, "unavailable")
+        self.assertEqual(
+            hostskills.codex_skills(self.tmp / "missing", user_home=self.tmp).status, "unavailable"
+        )
 
 
 if __name__ == "__main__":  # pragma: no cover

@@ -36,7 +36,7 @@ All the above documentation was introduced as the project's initial foundation i
   - `forgeflow design` and `/forge design`: one Markdown plan per job, prefilled from the discovery, validated (`design check`), and pinned as numbered, hashed versions (`design submit`, `design revise`).
   - `forgeflow approve` (Gate A): shows the exact plan version, its sha256 and what approval does and does not authorise, and records the approval only after the human types a one-time code at an interactive console. It is bound to the version shown and refused if the plan changed.
   - `forgeflow handoff`: publishes the approved plan as one GitHub issue on the bound Project in its Ready status, with a trace marker; idempotent across retries and interruptions, never overrides a status set on the board, and never publishes discovery notes.
-  - `forgeflow init` binds a GitHub Project after checking its Status field; `forgeflow skills` discovers the Product Management and Engineering skills each host can use.
+  - `forgeflow init` binds a GitHub Project after checking its Status field; `forgeflow skills` discovers the Product Management and Engineering skills each host can use: Claude Code plugins, and Codex plugins or skill folders such as `~/.agents/skills` (matched by their recorded Anthropic provenance), with the exact name each host invokes them by.
   - [ADR 0004](docs/decisions/0004-planning-workflow-and-gate-a.md), with the Gate A threat model and verification in the real Claude Code and Codex hosts.
 
 **No real Claude/Codex builder execution, branch or PR creation, dashboard or knowledge adapter has been implemented yet.**

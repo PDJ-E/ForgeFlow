@@ -396,7 +396,7 @@ def _init(start: Path, args: argparse.Namespace) -> int:
 
 
 def _skills(start: Path, args: argparse.Namespace) -> int:
-    found = hostskills.discover(args.host)
+    found = hostskills.discover(args.host, repo_root=main_worktree_root(start))
     if args.json:
         print(json.dumps(found.to_dict(), indent=2, sort_keys=True))
     else:

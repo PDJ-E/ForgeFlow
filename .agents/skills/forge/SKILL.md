@@ -45,9 +45,10 @@ current user (see `docs/getting-started.md`). Do not install anything.
 
 1. `idea <text>` starts a job with `idea new`; `idea resume <job>` runs `idea show <job>` and
    continues from the recorded outcomes, not from memory.
-2. Run `python -m forgeflow skills --host codex` once. If it names a skill for `idea` **and** that
-   skill is available in this session, use it as your thinking-partner guidance. Otherwise use
-   the fallback below.
+2. Run `python -m forgeflow skills --host codex` once. It lists each skill by the exact name to
+   invoke it with (for example `$pm-brainstorm`). If it names a skill for `idea` **and** that
+   skill is available in this session, invoke it by that name and use it as your
+   thinking-partner guidance. Otherwise use the fallback below.
 3. Converse. Keep it proportional: a small change needs a few questions, not a questionnaire.
    Explore the problem and users, surface assumptions and constraints, compare two or three
    approaches with their trade-offs, and let the user refine or reject them.
@@ -65,8 +66,10 @@ alternative; state what is out of scope.
 
 1. `python -m forgeflow design new <job>` creates one plan file from the discovery and prints its
    path. It is the only design document: do not create separate spec, task or ADR files.
-2. Run `skills` (as above) for `design`. Use listed skills that are available in this session to
-   strengthen the solution, trade-offs, risks and verification; otherwise cover them yourself:
+2. Run `skills` (as above) for `design`. Invoke the listed skills that are available in this
+   session by their exact names (for example `$pm-write-spec`, `$eng-system-design`,
+   `$eng-testing-strategy`) to strengthen the solution, trade-offs, risks and verification;
+   for any that are missing, cover it yourself:
    components and data flow, at least one alternative with its trade-off, failure modes, and
    which tests prove each acceptance criterion. Read the repository's existing docs and ADRs.
 3. Fill the plan with the user: replace every `TODO(forgeflow)` placeholder; keep required

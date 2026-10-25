@@ -122,6 +122,7 @@ It prints the plan, its version and sha256, the target repository and its visibi
 ### Host notes
 
 - **Claude Code:** verified end to end on 2026-10-25 (see [ADR 0004](decisions/0004-planning-workflow-and-gate-a.md#verification-in-the-real-hosts-2026-10-25)). Approve in a separate terminal window, not with `!`.
+- **Codex skills:** Codex reads skills from `~/.agents/skills` (user) and `<repo>/.agents/skills`. Adapted copies of Anthropic's skills there (for example `pm-brainstorm`, `eng-system-design`) are recognised by the `source-package` / `source-skill` provenance in their `SKILL.md`; `forgeflow skills --host codex` lists them with the `$name` to invoke. Verified 2026-10-25: `$forge idea` loaded `$pm-brainstorm`.
 - **Codex on Windows:** with `[windows] sandbox = "elevated"` in `~/.codex/config.toml`, Codex runs commands as the local user `CodexSandboxOffline`, which cannot read a Python installed only for your user. `$forge` then cannot run ForgeFlow at all. Either start Codex with `-c 'windows.sandbox="unelevated"'` (verified), or install Python 3.13 for all users. ForgeFlow does not change your Codex configuration. `init` and `handoff` need network access, which Codex's sandbox may block; run them in your own terminal (approval already performs the handoff).
 - **Windows path length:** plan snapshots are named by their 64-character hash. If the repository's path is very long (roughly 150+ characters), enable Windows long paths or use a shorter location.
 

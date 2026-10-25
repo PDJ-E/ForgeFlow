@@ -64,7 +64,7 @@ The job stays `plan_approved` with no worktree, and its builder stays `unassigne
 
 `/forge` (`.claude/skills/forge/SKILL.md`) and `$forge` (`.agents/skills/forge/SKILL.md`) hold the conversation and call the same CLI commands; a test keeps their command tables identical. Neither adapter runs `approve`. Both tell the human to run it in their own terminal.
 
-Product Management and Engineering skills are discovered, not assumed: `forgeflow skills --host claude-code|codex` reads `claude plugin list --json` or Codex's `config.toml` and plugin cache. The adapters load a listed skill only if it is also in their own session's skill list, and otherwise use short built-in fallback guidance.
+Product Management and Engineering skills are discovered, not assumed: `forgeflow skills --host claude-code|codex` reads `claude plugin list --json`, or for Codex its `config.toml` plugins plus plain skill folders (`<repo>/.agents/skills`, `~/.agents/skills`, `$CODEX_HOME/skills`). Skill folders are matched by the provenance in their `SKILL.md` front matter (`source-package`, `source-skill`), not by folder name. Each skill is reported under its canonical name (`product-management:write-spec`) and the exact name the host invokes it by (`$pm-write-spec` in Codex). The adapters load a listed skill only if it is also in their own session's skill list, and otherwise use short built-in fallback guidance.
 
 ## Verification in the real hosts (2026-10-25)
 
@@ -77,7 +77,8 @@ Claude Code 2.1.310 and Codex CLI 0.164.0 on Windows 11, with a disposable repos
   - Asked to "approve it for me", it declined and gave the human-only instructions.
   - Told to run `forgeflow approve` directly, its Bash tool got exit 3 and the job stayed `awaiting_plan_approval`.
 - **Codex** (`codex exec`, resumed):
-  - `$forge idea` found no Product Management or Engineering plugins and used the fallback guidance. It recorded outcomes, designed and submitted a plan, and declined to approve.
+  - First run, before the skills were installed: `$forge idea` found no Product Management or Engineering skills and used the fallback guidance. It recorded outcomes, designed and submitted a plan, and declined to approve.
+  - After the owner installed Codex adaptations of the Engineering, Product Management and Productivity skills in `~/.agents/skills` (22 skills: `pm-*`, `eng-*`, `productivity-*`, each carrying its Anthropic provenance), `forgeflow skills --host codex` reports the same canonical skills as Claude Code. In a fresh run, `$forge idea` selected `$pm-brainstorm` from that output, loaded its `SKILL.md` and references, and ran discovery with it, without the fallback.
   - A direct `forgeflow approve` was refused.
   - **Finding:** with this machine's `[windows] sandbox = "elevated"`, Codex runs commands as the local user `CodexSandboxOffline`. That user cannot read a Python installed only for the current user, so neither `python` nor `py -3.13` runs ForgeFlow. The run above used `codex exec -c 'windows.sandbox="unelevated"'`, a per-invocation override. Installing Python 3.13 for all users is the alternative. ForgeFlow changes no Codex configuration.
 - **Local channels:** `forgeflow approve` was refused from Git Bash with a pipe, with piped input, under `winpty` (stdin not a tty) and from the PowerShell tool. The PowerShell tool's stdin is `NUL`; there `sys.stdin.isatty()` returned `True`, but `GetConsoleMode` returned `False`.

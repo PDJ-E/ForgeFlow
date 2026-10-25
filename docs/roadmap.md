@@ -34,7 +34,7 @@ The first complete implementation target is **[MVP v0.1](mvp-scope.md)**. Work s
 ### Checkpoint B — Discovery and plan approval
 
 - [x] Interactive idea exploration (`/forge idea`), durable outcomes, one versioned plan per job (`/forge design`) ([ADR 0004](decisions/0004-planning-workflow-and-gate-a.md))
-- [x] Reuse available Anthropic Product Management and Engineering skills where proven accessible (loaded in Claude Code; Codex has none installed and uses fallback guidance)
+- [x] Reuse available Anthropic Product Management and Engineering skills where proven accessible (loaded as plugin skills in Claude Code and as `$pm-*` / `$eng-*` user skills in Codex; fallback guidance only when none is installed)
 - [x] Gate A: human plan approval at an interactive console before any issue or code; agent tool calls are refused
 - [x] Convert the approved plan into one traceable, idempotent GitHub Issue + Project item in Status Ready
 
