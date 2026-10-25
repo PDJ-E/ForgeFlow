@@ -66,6 +66,19 @@ class DiscoveryTests(GitRepoTestCase):
             "O1 [rejected] Banner - too noisy", discovery.render(found, include_closed=True)
         )
 
+    def test_a_rejected_option_can_be_recorded_directly(self) -> None:
+        job_id = self.start()
+        item = discovery.add(
+            self.store,
+            job_id,
+            "alternative",
+            "Use atexit",
+            status="rejected",
+            note="fires on errors",
+        )
+        self.assertEqual((item.status, item.note), ("rejected", "fires on errors"))
+        self.assertEqual(discovery.load(self.store, job_id).live("alternative"), [])
+
     def test_every_change_is_audited_and_advances_the_job_revision(self) -> None:
         job_id = self.start()
         before = self.store.load(job_id).revision

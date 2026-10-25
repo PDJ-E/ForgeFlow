@@ -96,7 +96,7 @@ def _parser() -> argparse.ArgumentParser:
     add.add_argument("job_id")
     add.add_argument("kind", choices=list(discovery.KINDS))
     add.add_argument("text")
-    add.add_argument("--status", choices=("proposed", "accepted"), default="proposed")
+    add.add_argument("--status", choices=("proposed", "accepted", "rejected"), default="proposed")
     add.add_argument("--note", default="")
     add.add_argument("--supersedes", help="id of the item this one replaces")
     mark = idea_sub.add_parser("mark", help="accept, reject or reinstate an outcome")

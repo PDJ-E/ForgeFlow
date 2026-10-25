@@ -180,8 +180,8 @@ def add(
     """Record one outcome. ``supersedes`` replaces an earlier item, which is kept as history."""
     if kind not in KINDS:
         raise ValidationError(f"unknown kind {kind!r}; use one of: {', '.join(KINDS)}")
-    if status not in ("proposed", "accepted"):
-        raise ValidationError("a new item is 'proposed' or 'accepted'")
+    if status not in ("proposed", "accepted", "rejected"):
+        raise ValidationError("a new item is 'proposed', 'accepted' or 'rejected'")
     body = _text(text, "text")
     created: list[Item] = []
 

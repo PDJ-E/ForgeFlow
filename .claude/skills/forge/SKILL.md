@@ -21,7 +21,7 @@ Run commands from the repository root and report their output faithfully, warnin
 | bind the GitHub Project | `python -m forgeflow init` (lists Projects), then `python -m forgeflow init --project <N>` only if the user names N |
 | skills available here | `python -m forgeflow skills --host claude-code` |
 | start discovery | `python -m forgeflow idea new "<title>" --idea "<user's words>"` |
-| record an outcome | `python -m forgeflow idea add <job> <kind> "<text>" [--status accepted] [--supersedes <id>]` |
+| record an outcome | `python -m forgeflow idea add <job> <kind> "<text>" [--status accepted|rejected] [--note "why"] [--supersedes <id>]` |
 | accept / reject / reinstate | `python -m forgeflow idea mark <job> <id> accepted|rejected|proposed [--note "..."]` |
 | resume discovery | `python -m forgeflow idea show <job>` |
 | create the plan | `python -m forgeflow design new <job>` |
@@ -46,7 +46,8 @@ Not implemented yet: `run`, `review`, `rework`, `resume`, `learn`. Say so and st
    Explore the problem and users, surface assumptions and constraints, compare two or three
    approaches with their trade-offs, and let the user refine or reject them.
 4. Record only conclusions worth resuming from, as they are reached: an accepted requirement,
-   a rejected alternative (with the reason), a decision. Use `--supersedes` to refine an item and
+   a rejected alternative stated as the option itself with `--status rejected --note "<reason>"`,
+   a decision. Use `--supersedes` to refine an item and
    `idea mark` to reject one or return to an earlier one. Do not record chit-chat.
 5. When the user is satisfied, suggest `/forge design <job>`.
 

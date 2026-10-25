@@ -19,7 +19,7 @@ Run commands from the repository root and report their output faithfully, warnin
 | bind the GitHub Project | `python -m forgeflow init` (lists Projects), then `python -m forgeflow init --project <N>` only if the user names N |
 | skills available here | `python -m forgeflow skills --host codex` |
 | start discovery | `python -m forgeflow idea new "<title>" --idea "<user's words>"` |
-| record an outcome | `python -m forgeflow idea add <job> <kind> "<text>" [--status accepted] [--supersedes <id>]` |
+| record an outcome | `python -m forgeflow idea add <job> <kind> "<text>" [--status accepted|rejected] [--note "why"] [--supersedes <id>]` |
 | accept / reject / reinstate | `python -m forgeflow idea mark <job> <id> accepted|rejected|proposed [--note "..."]` |
 | resume discovery | `python -m forgeflow idea show <job>` |
 | create the plan | `python -m forgeflow design new <job>` |
@@ -36,7 +36,10 @@ Not implemented yet: `run`, `review`, `rework`, `resume`, `learn`. Say so and st
 Codex notes: discovery and design write only inside `.forge/runtime/` of this workspace, which
 the default workspace-write sandbox allows. `init`, `doctor` and `handoff` contact GitHub; if the
 sandbox blocks the network, say so and ask the user to run that command in their own terminal
-(approval already publishes the plan, so `handoff` is normally only a retry).
+(approval already publishes the plan, so `handoff` is normally only a retry). If neither
+`python` nor `py -3.13` can run ForgeFlow here, say so and stop: Codex's elevated Windows
+sandbox runs commands as a separate user that cannot see a Python installed only for the
+current user (see `docs/getting-started.md`). Do not install anything.
 
 ## idea - interactive discovery
 
@@ -49,7 +52,8 @@ sandbox blocks the network, say so and ask the user to run that command in their
    Explore the problem and users, surface assumptions and constraints, compare two or three
    approaches with their trade-offs, and let the user refine or reject them.
 4. Record only conclusions worth resuming from, as they are reached: an accepted requirement,
-   a rejected alternative (with the reason), a decision. Use `--supersedes` to refine an item and
+   a rejected alternative stated as the option itself with `--status rejected --note "<reason>"`,
+   a decision. Use `--supersedes` to refine an item and
    `idea mark` to reject one or return to an earlier one. Do not record chit-chat.
 5. When the user is satisfied, suggest `$forge design <job>`.
 
