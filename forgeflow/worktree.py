@@ -13,7 +13,6 @@ Safety rules:
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -268,9 +267,8 @@ def prepare_job_worktree(
 ) -> Job:
     """Create (or verify) the job's worktree and record it in the job."""
     job = store.load(job_id)
-    if os.path.normcase(os.path.abspath(job.repo.root)) != os.path.normcase(
-        os.path.abspath(manager.repo_root)
-    ):
+    # normalized() also resolves 8.3 short names (e.g. RUNNER~1) and junctions, not just case.
+    if fsutil.normalized(job.repo.root) != fsutil.normalized(manager.repo_root):
         raise ValidationError("the worktree manager belongs to a different repository")
     worktree = manager.create_or_reattach(job, base_ref)
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import subprocess
+import sys
 import unittest
 from pathlib import Path
 
@@ -131,6 +132,25 @@ class WorktreeLifecycleTests(GitRepoTestCase):
         self.store.transition(job.job_id, JobState.CANCELLED, reason="dropped")
         with self.assertRaises(WorktreeError):
             prepare_job_worktree(self.store, self.manager, job.job_id)
+
+
+class PathFormTests(GitRepoTestCase):
+    def test_short_8dot3_repo_path_is_the_same_repository(self) -> None:
+        # GitHub's Windows runners keep %TEMP% under an 8.3 name (RUNNER~1); git reports long paths.
+        if sys.platform != "win32":
+            self.skipTest("8.3 short names are a Windows filesystem feature")
+        import ctypes
+
+        buf = ctypes.create_unicode_buffer(1024)
+        ctypes.windll.kernel32.GetShortPathNameW(str(self.repo), buf, 1024)
+        if not buf.value or buf.value == str(self.repo):
+            self.skipTest("8.3 name generation is disabled on this volume")
+        short = Path(buf.value)
+        job = prepare_job_worktree(self.store, WorktreeManager(short), self.approved_job().job_id)
+        assert job.worktree is not None
+        self.assertTrue(Path(job.worktree.path).is_dir())
+        # Re-entry through the other path form must recognise the same worktree.
+        prepare_job_worktree(self.store, WorktreeManager(self.repo), job.job_id)
 
 
 class ParseWorktreeListTests(unittest.TestCase):
