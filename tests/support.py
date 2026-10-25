@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import shutil
 import stat
 import subprocess
@@ -163,33 +162,40 @@ class GitRepoTestCase(unittest.TestCase):
 
 
 class ScriptedConsole:
-    """Test double for the human at the console. ``answer=None`` types the code shown."""
+    """Test double for the human at the console: answers ``answer`` (default "y")."""
 
     kind = "test-console"
 
     def __init__(
         self,
-        answer: str | None = None,
+        answer: str = "y",
         *,
         before_answer: Callable[[], None] | None = None,
+        type_ahead: str | None = None,
     ) -> None:
         self.answer = answer
         self.before_answer = before_answer
+        # Keys pressed before the question appeared; discard_pending_input() drops them.
+        self.pending = type_ahead
         self.shown = ""
         self.prompts: list[str] = []
+        self.calls: list[str] = []
 
     def write(self, text: str) -> None:
         self.shown += text
 
+    def discard_pending_input(self) -> None:
+        self.calls.append("discard")
+        self.pending = None
+
     def read_line(self, prompt: str) -> str:
+        self.calls.append("read")
         self.prompts.append(prompt)
         if self.before_answer is not None:
             self.before_answer()  # e.g. someone edits the plan while the human reads it
-        if self.answer is not None:
-            return self.answer
-        match = re.search(r"Type (\S+) to approve", prompt)
-        assert match is not None
-        return match.group(1)
+        if self.pending is not None:  # type-ahead would answer if it had not been discarded
+            return self.pending
+        return self.answer
 
 
 def pull_request(

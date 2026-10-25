@@ -75,6 +75,13 @@ class HandoffTests(GitRepoTestCase):
         self.assertIs(linked.state, JobState.PLAN_APPROVED)  # no worktree, nothing dispatched
         self.assertIsNone(linked.worktree)
 
+    def test_footer_links_the_project_by_url_not_by_number(self) -> None:
+        self.run_handoff(self.approved())
+        body = self.world.issues[1]["body"]
+        footer = body.split("\n---\n")[-1]
+        self.assertIn(f"[ForgeFlow Development]({PROJECT_URL})", footer)
+        self.assertNotRegex(footer, r"#\d")  # nothing GitHub would auto-link to an issue/PR
+
     def test_rerun_is_idempotent(self) -> None:
         job = self.approved()
         self.run_handoff(job)

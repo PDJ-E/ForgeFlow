@@ -59,18 +59,25 @@ def marker_for(job_id: str, plan_sha256: str) -> str:
     return f"<!-- forgeflow:trace job={job_id} plan_sha256={plan_sha256} -->"
 
 
-def issue_content(job: Job, plan_text: str) -> tuple[str, str]:
-    """The issue title and body for an approved plan: its text verbatim, plus a trace."""
+def issue_content(
+    job: Job, plan_text: str, project: ProjectBinding | None = None
+) -> tuple[str, str]:
+    """The issue title and body for an approved plan: its text verbatim, plus a trace.
+
+    The footer names the Project by a Markdown link to its URL, never as "Project #N": GitHub
+    turns "#N" into a link to issue or pull request N of the repository.
+    """
     approval = job.plan.approval
     if approval is None:
         raise InvalidTransitionError("Gate A: the plan has not been approved")
     title = design.check_text(plan_text).title or job.title
+    board = f" Tracked on the GitHub Project [{project.title}]({project.url})." if project else ""
     footer = (
         "\n\n---\n"
         f"<sub>Approved plan handed off by ForgeFlow: job `{job.job_id}`, plan version "
         f"{approval.subject_version or job.plan.version}, sha256 `{approval.subject_sha256}`, "
-        f"approved {approval.approved_at} at an interactive console. Implementation has not "
-        "started and no builder has been dispatched.</sub>\n\n"
+        f"approved {approval.approved_at} at an interactive console.{board} Implementation "
+        "has not started and no builder has been dispatched.</sub>\n\n"
         f"{marker_for(job.job_id, approval.subject_sha256)}\n"
     )
     return title, plan_text.rstrip() + footer
@@ -103,7 +110,7 @@ def describe(
     where = f"GitHub issue #{link_number} (as a comment)" if link_number else "a NEW GitHub issue"
     target_line = f"in {job.repo.slug}"
     status = f"Status '{binding.ready_status}'"
-    project = f"GitHub Project #{binding.number} '{binding.title}'"
+    project = f"the GitHub Project '{binding.title}' ({binding.url})"
     if client is not None:
         try:
             target = resolve_target(client, job.repo.slug, binding)
@@ -158,7 +165,7 @@ def _handoff(
     if approval is None:  # verify_plan_approval guarantees one
         raise InvalidTransitionError("Gate A: the plan has not been approved")
     plan_text = store.approved_plan_text(job)
-    title, body = issue_content(job, plan_text)
+    title, body = issue_content(job, plan_text, binding)
     marker = marker_for(job_id, approval.subject_sha256)
     target = resolve_target(client, slug, binding)
     result_actions: list[str] = []

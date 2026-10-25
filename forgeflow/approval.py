@@ -9,9 +9,11 @@ it). It runs only when **both** standard input and standard output are an intera
 
 An agent's ordinary tool calls (Claude Code's Bash tool, ``codex exec``, a piped ``echo``) have
 no such console, so the command refuses and records nothing. The human sees the full plan from
-its byte-exact snapshot, the version, the sha256 and what the approval authorises, then types a
-one-time code. The code guards against approving by accident (a stray Enter, a pasted script);
-it is not the security property, which is the console requirement. The decision is committed
+its byte-exact snapshot, the version, the sha256 and what the approval authorises, then answers
+a y/N question. Only "y" or "yes" approves; anything else, an empty answer, end of input or
+Ctrl+C cancels. Input typed or pasted before the question appears is discarded first, so it
+cannot answer it. The security property is the console requirement, not the question (ADR 0004
+explains why a one-time code added no real security). The decision is committed
 against the job revision that was displayed, after re-hashing the plan, so an edit or a
 resubmission made while the human was reading is refused rather than approved.
 
@@ -26,7 +28,6 @@ from __future__ import annotations
 
 import getpass
 import os
-import secrets
 import sys
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -36,7 +37,7 @@ from forgeflow.errors import ConcurrencyError, ForgeFlowError, InvalidTransition
 from forgeflow.jobs import HUMAN_APPROVAL_METHOD, Approval, Job, JobState, utc_now
 from forgeflow.store import JobStore
 
-_CODE_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"  # no 0/O, 1/I/L
+APPROVE_ANSWERS = frozenset({"y", "yes"})
 
 
 class ApprovalUnavailableError(ForgeFlowError):
@@ -52,6 +53,8 @@ class HumanConsole(Protocol):
 
     def write(self, text: str) -> None: ...
 
+    def discard_pending_input(self) -> None: ...
+
     def read_line(self, prompt: str) -> str: ...
 
 
@@ -62,6 +65,9 @@ class _StdioConsole:
     def write(self, text: str) -> None:
         sys.stdout.write(text)
         sys.stdout.flush()
+
+    def discard_pending_input(self) -> None:
+        _flush_input(sys.stdin.fileno())
 
     def read_line(self, prompt: str) -> str:
         return input(prompt)
@@ -81,8 +87,22 @@ if sys.platform == "win32":
         kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
         return bool(kernel32.GetConsoleMode(wintypes.HANDLE(handle), ctypes.byref(mode)))
 
+    def _flush_input(fd: int) -> None:
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        if not kernel32.FlushConsoleInputBuffer(wintypes.HANDLE(msvcrt.get_osfhandle(fd))):
+            raise ApprovalUnavailableError("could not clear pending console input; not asking")
+
     _CONSOLE_KIND = "windows-console"
 else:
+    import termios
+
+    def _flush_input(fd: int) -> None:
+        try:
+            termios.tcflush(fd, termios.TCIFLUSH)
+        except termios.error as exc:
+            raise ApprovalUnavailableError(
+                "could not clear pending terminal input; not asking"
+            ) from exc
 
     def _is_console(fd: int) -> bool:
         try:
@@ -127,11 +147,6 @@ DEFAULT_NOT_AUTHORISED = (
 )
 
 
-def one_time_code() -> str:
-    raw = "".join(secrets.choice(_CODE_ALPHABET) for _ in range(8))
-    return f"{raw[:4]}-{raw[4:]}"
-
-
 def approve_plan(store: JobStore, job_id: str, context: ApprovalContext | None = None) -> Job:
     """Show the submitted plan to a human and record their explicit approval of exactly it."""
     context = context or ApprovalContext()
@@ -156,11 +171,11 @@ def approve_plan(store: JobStore, job_id: str, context: ApprovalContext | None =
     rule = "=" * 78
     lines = [
         rule,
-        f" GATE A - PLAN APPROVAL   job {job.job_id}",
+        f" GATE A - PLAN APPROVAL   job {job.label}",
         rule,
         text.rstrip("\n"),
         rule,
-        f" Job          {job.job_id}: {job.title}",
+        f" Job          {job.label}: {job.title}",
         f" Repository   {job.repo.slug or job.repo.root}",
         f" Plan         version {job.plan.version}, submitted {job.plan.submitted_at or '?'}",
         f" sha256       {digest}",
@@ -175,13 +190,17 @@ def approve_plan(store: JobStore, job_id: str, context: ApprovalContext | None =
         rule,
     ]
     console.write("\n".join(lines) + "\n")
-    code = one_time_code()
+    question = (
+        f"Approve plan v{job.plan.version} of {job.ref or job.job_id} "
+        f"(sha256 {digest[:12]}...)? [y/N] "
+    )
     try:
-        typed = console.read_line(f"Type {code} to approve this plan (Enter cancels): ")
+        console.discard_pending_input()  # nothing typed before the question can answer it
+        typed = console.read_line(question)
     except (EOFError, KeyboardInterrupt) as exc:
         raise ApprovalDeclinedError("approval cancelled; nothing was recorded") from exc
-    if typed.strip().upper() != code:
-        raise ApprovalDeclinedError("the code did not match; nothing was approved")
+    if typed.strip().lower() not in APPROVE_ANSWERS:
+        raise ApprovalDeclinedError("not confirmed; nothing was approved")
 
     approval = Approval(
         gate="plan",
@@ -189,7 +208,7 @@ def approve_plan(store: JobStore, job_id: str, context: ApprovalContext | None =
         approved_at=utc_now(),
         subject_sha256=digest,
         method=HUMAN_APPROVAL_METHOD,
-        note=f"confirmed with a one-time code at a {console.kind}",
+        note=f"confirmed with y/N at a {console.kind}",
         subject_version=job.plan.version,
     )
     try:

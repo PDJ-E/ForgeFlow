@@ -86,9 +86,9 @@ class CeremonyTests(GitRepoTestCase):
             (job.plan.sha256, 1, "interactive-console"),
         )
 
-    def test_wrong_code_empty_answer_and_eof_record_nothing(self) -> None:
+    def test_anything_but_y_or_yes_cancels_and_records_nothing(self) -> None:
         job = self.submitted()
-        for answer in ("yes", "", "approve"):
+        for answer in ("", "n", "no", "N", "yes please", "ye", "approve", "1", "true", "ok"):
             with self.subTest(answer=answer), self.assertRaises(approval.ApprovalDeclinedError):
                 self.approve(job.job_id, ScriptedConsole(answer))
 
@@ -96,15 +96,44 @@ class CeremonyTests(GitRepoTestCase):
             def read_line(self, prompt: str) -> str:
                 raise EOFError
 
-        with self.assertRaises(approval.ApprovalDeclinedError):
-            self.approve(job.job_id, Eof())
+        class CtrlC(ScriptedConsole):
+            def read_line(self, prompt: str) -> str:
+                raise KeyboardInterrupt
+
+        for console in (Eof(), CtrlC()):
+            with self.subTest(type(console).__name__):
+                with self.assertRaises(approval.ApprovalDeclinedError):
+                    self.approve(job.job_id, console)
         current = self.store.load(job.job_id)
         self.assertIs(current.state, S.AWAITING_PLAN_APPROVAL)
         self.assertIsNone(current.plan.approval)
+        self.assertEqual(current.revision, job.revision)  # nothing at all was written
 
-    def test_each_attempt_uses_a_fresh_code(self) -> None:
-        codes = {approval.one_time_code() for _ in range(50)}
-        self.assertEqual(len(codes), 50)
+    def test_y_and_yes_approve_in_any_case(self) -> None:
+        for answer in ("y", "Y", "yes", "YES", " Yes "):
+            with self.subTest(answer=answer):
+                job = self.submitted()
+                approved = self.approve(job.job_id, ScriptedConsole(answer))
+                self.assertIs(approved.state, S.PLAN_APPROVED)
+
+    def test_question_defaults_to_no_and_names_version_and_hash(self) -> None:
+        job = self.submitted()
+        console = ScriptedConsole()
+        self.approve(job.job_id, console)
+        assert job.plan.sha256 is not None
+        self.assertEqual(
+            console.prompts,
+            [f"Approve plan v1 of {job.ref} (sha256 {job.plan.sha256[:12]}...)? [y/N] "],
+        )
+
+    def test_type_ahead_is_discarded_before_asking(self) -> None:
+        job = self.submitted()
+        # "y" pressed while the plan scrolled must not count; the human then declines.
+        console = ScriptedConsole("", type_ahead="y")
+        with self.assertRaises(approval.ApprovalDeclinedError):
+            self.approve(job.job_id, console)
+        self.assertEqual(console.calls, ["discard", "read"])
+        self.assertIsNone(self.store.load(job.job_id).plan.approval)
 
     def test_plan_edited_while_the_human_reads_is_not_approved(self) -> None:
         job = self.submitted()

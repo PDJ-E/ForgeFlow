@@ -161,6 +161,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         handler = _HANDLERS.get(args.command)
         if handler is not None:
+            _resolve_job_argument(start, args)
             return handler(start, args)
         checkpoint = NOT_YET[args.command]
         print(
@@ -172,6 +173,22 @@ def main(argv: Sequence[str] | None = None) -> int:
     except ForgeFlowError as exc:
         print(f"forgeflow: {exc}", file=sys.stderr)
         return 1
+
+
+# Commands that only read; they resolve references without assigning missing ones.
+_READ_ONLY = {("idea", "show"), ("design", "check"), ("design", "show")}
+
+
+def _resolve_job_argument(start: Path, args: argparse.Namespace) -> None:
+    """Turn ``J3`` (or a full id) into the job id. Writing commands first give older jobs
+    their short references, so every job can be addressed as J<n>."""
+    token = getattr(args, "job_id", None)
+    if not token:
+        return
+    store = _store(start)
+    if (args.command, getattr(args, "action", None)) not in _READ_ONLY:
+        store.assign_missing_refs()
+    args.job_id = store.resolve(token)
 
 
 # --- doctor -----------------------------------------------------------------------------------
@@ -223,6 +240,7 @@ def _status(start: Path, job_id: str | None, *, as_json: bool, events: int) -> i
     root = main_worktree_root(start)
     store = JobStore.for_repo(root)
     if job_id:
+        job_id = store.resolve(job_id)  # read-only: status never assigns references
         job = store.load(job_id)
         recent = store.events(job_id)[-events:] if events > 0 else []
         if as_json:
@@ -254,9 +272,10 @@ def _status(start: Path, job_id: str | None, *, as_json: bool, events: int) -> i
     if not jobs and not problems:
         print(f"No ForgeFlow jobs in {root}.")
         return 0
-    header = ("JOB", "STATE", "BUILDER", "ISSUE", "BRANCH", "WORKER", "UPDATED")
+    header = ("REF", "JOB", "STATE", "BUILDER", "ISSUE", "BRANCH", "WORKER", "UPDATED")
     rows = [header] + [
         (
+            j.ref or "-",
             j.job_id,
             j.state.value,
             j.policy.builder,
@@ -278,6 +297,7 @@ def _status(start: Path, job_id: str | None, *, as_json: bool, events: int) -> i
 def _summary_row(job: Job) -> dict[str, object]:
     return {
         "job_id": job.job_id,
+        "ref": job.ref,
         "title": job.title,
         "state": job.state.value,
         "builder": job.policy.builder,
@@ -293,7 +313,7 @@ def _format_job(job: Job, recent: list[dict[str, object]]) -> str:
     gh = job.github
     approval = job.plan.approval
     lines = [
-        f"Job {job.job_id}: {job.title}",
+        f"Job {job.label}: {job.title}",
         f"  state          {job.state.value}"
         + (f" (from {job.interrupted_from.value})" if job.interrupted_from else ""),
         f"  repository     {job.repo.slug or '-'}  base {job.repo.base_branch}",
@@ -410,12 +430,13 @@ def _idea(start: Path, args: argparse.Namespace) -> int:
         ident = discover_identity(start)
         repo = Repo(ident.root, ident.slug, ident.remote_url, ident.base_branch)
         job, _ = discovery.start(store, args.title, args.idea, repo)
+        ref = job.ref or job.job_id
         print(
-            f"Started discovery {job.job_id}: {job.title}\n"
+            f"Started discovery {job.label}: {job.title}\n"
             "  state draft: discussion only; nothing can be built, approved or published yet\n"
-            f'  record an outcome:  forgeflow idea add {job.job_id} <kind> "<text>"\n'
-            f"  resume later:       forgeflow idea show {job.job_id}\n"
-            f"  when ready:         forgeflow design new {job.job_id}"
+            f'  record an outcome:  forgeflow idea add {ref} <kind> "<text>"\n'
+            f"  resume later:       forgeflow idea show {ref}\n"
+            f"  when ready:         forgeflow design new {ref}"
         )
         return 0
     if args.action == "add":
@@ -440,7 +461,7 @@ def _idea(start: Path, args: argparse.Namespace) -> int:
     if args.json:
         print(json.dumps({"state": job.state.value, **found.to_dict()}, indent=2, sort_keys=True))
     else:
-        print(f"Discovery {job.job_id}: {job.title} (state {job.state.value})")
+        print(f"Discovery {job.label}: {job.title} (state {job.state.value})")
         print(discovery.render(found, include_closed=args.all))
     return 0
 
@@ -457,16 +478,17 @@ def _print_check(result: design.PlanCheck) -> None:
 def _design(start: Path, args: argparse.Namespace) -> int:
     store = _store(start)
     job_id = args.job_id
+    ref = store.load(job_id).ref or job_id
     if args.action == "new":
         path, created = design.scaffold(store, job_id)
         verb = "Created" if created else "Plan already exists (not overwritten):"
         print(f"{verb} {path}")
-        print("Edit it with the user, then: forgeflow design check / submit " + job_id)
+        print("Edit it with the user, then: forgeflow design check / submit " + ref)
         _print_check(design.check(store, job_id))
         return 0
     if args.action == "check":
         result = design.check(store, job_id)
-        print(f"Plan of {job_id}: " + ("ready to submit" if result.ok else "not ready"))
+        print(f"Plan of {ref}: " + ("ready to submit" if result.ok else "not ready"))
         _print_check(result)
         return 0 if result.ok else 1
     if args.action == "show":
@@ -475,24 +497,24 @@ def _design(start: Path, args: argparse.Namespace) -> int:
         text = path.read_text(encoding="utf-8") if path.exists() else "(no plan yet)\n"
         print(text.rstrip("\n"))
         print("-" * 78)
-        print(f"{job_id}: state {job.state.value}; {_plan_line(job)}")
+        print(f"{job.label}: state {job.state.value}; {_plan_line(job)}")
         if job.plan.sha256 and path.exists() and store.plan_digest(job) != job.plan.sha256:
             print(f"The file differs from submitted version {job.plan.version}; resubmit it.")
         return 0
     if args.action == "submit":
         job, result = design.submit(store, job_id, reason=args.reason)
-        print(f"Submitted plan version {job.plan.version} of {job_id} for approval.")
+        print(f"Submitted plan version {job.plan.version} of {job.label} for approval.")
         print(f"  sha256 {job.plan.sha256}")
         _print_check(result)
         print(
             "\nGate A: the plan is approved only by a human, in their own terminal "
             "(not through an agent):\n"
-            f"  py -3.13 -m forgeflow approve {job_id}      (Windows)\n"
-            f"  python3.13 -m forgeflow approve {job_id}    (Linux/macOS)"
+            f"  py -3.13 -m forgeflow approve {ref}      (Windows)\n"
+            f"  python3.13 -m forgeflow approve {ref}    (Linux/macOS)"
         )
         return 0
     job = design.revise(store, job_id, args.reason)
-    print(f"{job_id} is {job.state.value}; edit the plan, then submit it again.")
+    print(f"{job.label} is {job.state.value}; edit the plan, then submit it again.")
     return 0
 
 
@@ -519,7 +541,7 @@ def _approve(start: Path, args: argparse.Namespace) -> int:
         print(f"forgeflow: {exc}", file=sys.stderr)
         print(
             "Run it yourself in a terminal window (PowerShell, Windows Terminal, a shell):\n"
-            f"  py -3.13 -m forgeflow approve {args.job_id}",
+            f"  py -3.13 -m forgeflow approve {job.ref or args.job_id}",
             file=sys.stderr,
         )
         return 3
@@ -530,18 +552,19 @@ def _approve(start: Path, args: argparse.Namespace) -> int:
     if approval is None:  # approve_plan returns only an approved job
         raise ForgeFlowError("the approval was not recorded")
     print(
-        f"\nApproved plan version {approval.subject_version} of {job.job_id} "
+        f"\nApproved plan version {approval.subject_version} of {job.label} "
         f"(sha256 {approval.subject_sha256[:16]}...)."
     )
     if args.no_handoff or binding is None:
-        print(f"Publish it when ready: forgeflow handoff {job.job_id}")
+        print(f"Publish it when ready: forgeflow handoff {job.ref or job.job_id}")
         return 0
     try:
         return _run_handoff(store, job.job_id, binding, args.issue)
     except ForgeFlowError as exc:
         print(f"forgeflow: handoff failed: {exc}", file=sys.stderr)
         print(
-            f"The approval is recorded. Retry safely with: forgeflow handoff {job.job_id}",
+            "The approval is recorded. Retry safely with: forgeflow handoff "
+            f"{job.ref or job.job_id}",
             file=sys.stderr,
         )
         return 1
@@ -552,7 +575,7 @@ def _handoff(start: Path, args: argparse.Namespace) -> int:
     binding = load_binding(store.repo_root)
     if args.dry_run:
         job = store.verify_plan_approval(args.job_id)
-        title, body = issue_content(job, store.approved_plan_text(job))
+        title, body = issue_content(job, store.approved_plan_text(job), binding)
         print("Dry run: nothing is written.")
         for line in describe(job, binding, GitHubClient(), args.issue):
             print(f"  would: {line}")
@@ -574,7 +597,7 @@ def _run_handoff(
         f"Issue {result.issue.url}\n"
         f"Project #{result.item.project_number} {result.item.project_title}: item "
         f"{result.item.item_id}, Status {result.item.status or '(none)'}\n"
-        f"Job {job_id} stays {result.job.state.value}: no worktree, branch or builder "
+        f"Job {result.job.label} stays {result.job.state.value}: no worktree, branch or builder "
         "(Checkpoint C prepares and dispatches the work)."
     )
     return 0

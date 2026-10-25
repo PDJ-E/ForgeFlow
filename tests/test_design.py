@@ -91,6 +91,21 @@ class PlanCheckTests(GitRepoTestCase):
         self.assertTrue(any("local user path" in w for w in result.warnings))
 
 
+class ProjectNumberWarningTests(GitRepoTestCase):
+    def test_project_hash_numbers_are_flagged(self) -> None:
+        for text in ("on Project #2 in Ready", "the GitHub Project ForgeFlow Development #2"):
+            with self.subTest(text=text):
+                result = design.check_text(VALID_PLAN.replace("Only the greeting.", text))
+                self.assertTrue(any("links to issue or pull request" in w for w in result.warnings))
+
+    def test_issue_references_and_project_urls_are_fine(self) -> None:
+        text = VALID_PLAN.replace(
+            "Only the greeting.",
+            "Follows issue #12. Board: [Dev](https://github.com/users/x/projects/2).",
+        )
+        self.assertEqual(design.check_text(text).warnings, [])
+
+
 class DesignWorkflowTests(GitRepoTestCase):
     def draft(self) -> str:
         job, _ = discovery.start(self.store, "Greeting", "greet users", self.repo_record())

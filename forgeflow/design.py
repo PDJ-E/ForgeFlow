@@ -54,7 +54,12 @@ _H2 = re.compile(r"^## (?!#)(.+?)\s*$", re.MULTILINE)
 _TASK = re.compile(r"^### (T\d+)\s*[:.\-—]\s*(.+?)\s*$", re.MULTILINE)
 _H3 = re.compile(r"^### ", re.MULTILINE)
 _CRITERION = re.compile(r"^\s*[-*] \[ \] \S", re.MULTILINE)
-_LOCAL_PATH = re.compile(r"(?i)\b[a-z]:\\users\\|/home/[a-z0-9_.-]+/|/Users/[A-Za-z0-9_.-]+/")
+# "Project #2", "GitHub Project ForgeFlow Development #2": GitHub links "#2" to issue/PR 2.
+_PROJECT_NUMBER = re.compile(r"(?i)\bprojects?\b[^\n#`]{0,40}#\d+")
+# A POSIX home path counts only where it starts a token, so github.com/users/x/ does not match.
+_LOCAL_PATH = re.compile(
+    r"(?i:\b[a-z]:\\users\\)|(?<![\w.:/-])(?:/home/[a-z0-9_.-]+/|/Users/[A-Za-z0-9_.-]+/)"
+)
 
 
 @dataclass(frozen=True)
@@ -150,6 +155,12 @@ def check_text(text: str) -> PlanCheck:
     if _LOCAL_PATH.search(text):
         result.warnings.append(
             "the plan contains a local user path; it is published verbatim to GitHub on handoff"
+        )
+    project_ref = _PROJECT_NUMBER.search(text)
+    if project_ref:
+        result.warnings.append(
+            f"{project_ref.group(0)!r}: on GitHub '#N' links to issue or pull request N of the "
+            "repository, not to a Project; name the Project and link its URL instead"
         )
     return result
 

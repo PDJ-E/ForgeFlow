@@ -30,6 +30,9 @@ Run commands from the repository root and report their output faithfully, warnin
 | withdraw to revise | `python -m forgeflow design revise <job> --reason "..."` |
 | publish an approved plan | `python -m forgeflow handoff <job>` (`--dry-run` previews) |
 
+`<job>` is the short reference ForgeFlow prints (for example `J3`) or the full id
+(`ff-YYYYMMDD-xxxxxx`). Use the short reference when talking to the user.
+
 Kinds: problem, user, goal, requirement, constraint, assumption, alternative, decision, risk,
 question, non-goal.
 

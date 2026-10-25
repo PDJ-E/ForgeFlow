@@ -28,6 +28,7 @@ HUMAN_APPROVAL_METHOD = "interactive-console"
 
 # Job IDs become directory and branch names, so the format is strict: no separators, no "..".
 JOB_ID_PATTERN = re.compile(r"^ff-\d{8}-[0-9a-f]{6}$")
+JOB_REF_PATTERN = re.compile(r"^J[1-9]\d{0,8}$")  # canonical form; input is case-insensitive
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _PROVIDER_NAME = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
 
@@ -594,15 +595,24 @@ class Job:
     evidence: list[Evidence] = field(default_factory=list)
     revision: int = 0
     schema_version: int = SCHEMA_VERSION
+    # Short local alias (J1, J2, ...) for people; unique within one store, never reused.
+    # job_id stays the identifier for directories, branches, logs and GitHub.
+    ref: str | None = None
 
     @property
     def is_terminal(self) -> bool:
         return self.state in TERMINAL_STATES
 
+    @property
+    def label(self) -> str:
+        """How the job is shown to people: ``J3 (ff-...)``, or the id alone."""
+        return f"{self.ref} ({self.job_id})" if self.ref else self.job_id
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "schema_version": self.schema_version,
             "job_id": self.job_id,
+            "ref": self.ref,
             "title": self.title,
             "state": self.state.value,
             "repo": self.repo.to_dict(),
@@ -647,8 +657,12 @@ class Job:
         title = _get(d, "title", str, "job")
         if not title.strip():
             raise ValidationError("job.title must not be empty")
+        ref = _get(d, "ref", str, "job", optional=True)
+        if ref is not None and not JOB_REF_PATTERN.match(ref):
+            raise ValidationError(f"job.ref {ref!r} is not a reference like J12")
         return cls(
             job_id=job_id,
+            ref=ref,
             title=title,
             state=state,
             repo=Repo.from_dict(_obj(d, "repo", "job")),

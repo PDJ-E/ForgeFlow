@@ -59,6 +59,7 @@ from forgeflow.errors import (
 from forgeflow.gitrepo import git_ok, porcelain_status
 from forgeflow.jobs import (
     HUMAN_APPROVAL_METHOD,
+    JOB_ID_PATTERN,
     REWORK_SOURCES,
     SLOT_STATES,
     TERMINAL_STATES,
@@ -271,6 +272,9 @@ class JobStore:
             )
         with self._state_lock():
             self._ensure_layout()
+            # Older jobs get their references first, so numbering follows creation order.
+            self._assign_missing_refs_locked()
+            ref = self._next_ref_locked()
             for _ in range(5):
                 job_id = new_job_id()
                 try:
@@ -283,6 +287,7 @@ class JobStore:
             now = utc_now()
             draft = Job(
                 job_id=job_id,
+                ref=ref,
                 title=title.strip(),
                 state=S.DRAFT,
                 repo=repo,
@@ -293,8 +298,75 @@ class JobStore:
             )
             job = Job.from_dict(draft.to_dict())  # validate (and redact) before the first write
             fsutil.atomic_write_json(self._job_file(job_id), job.to_dict())
-            self._append_event(job, "created", None, details={"title": job.title})
+            self._append_event(job, "created", None, details={"title": job.title, "ref": ref})
         return job
+
+    # --- short references (J1, J2, ...) --------------------------------------------------------
+
+    def _refs_file(self) -> Path:
+        return self.runtime_dir / "refs.json"
+
+    def _next_ref_locked(self) -> str:
+        """Allocate the next reference. The counter is saved before the reference is used, so a
+        crash can skip a number but never hand one out twice; deleted jobs keep theirs."""
+        path = self._refs_file()
+        try:
+            counter = int(fsutil.read_json(path)["next"])
+        except FileNotFoundError:
+            counter = 1
+        except (ValueError, KeyError, TypeError) as exc:
+            raise ValidationError(f"{path} is corrupt ({exc}); fix or remove it") from exc
+        jobs, _ = self.list_jobs()
+        used = max((int(j.ref[1:]) for j in jobs if j.ref), default=0)
+        number = max(counter, used + 1)  # never below a reference already on disk
+        fsutil.atomic_write_json(path, {"next": number + 1})
+        return f"J{number}"
+
+    def _assign_missing_refs_locked(self) -> list[Job]:
+        jobs, _ = self.list_jobs()
+        assigned = []
+        for job in sorted((j for j in jobs if j.ref is None), key=lambda j: j.created_at):
+            ref = self._next_ref_locked()
+
+            def apply(current: Job, ref: str = ref) -> None:
+                if current.ref is None:
+                    current.ref = ref
+
+            assigned.append(
+                self._mutate_locked(job.job_id, apply, "ref-assigned", {"ref": ref}, None)
+            )
+        return assigned
+
+    def assign_missing_refs(self) -> list[Job]:
+        """Give jobs created before short references existed their J<n>. Idempotent."""
+        if not self.jobs_dir.is_dir():
+            return []
+        with self._state_lock():
+            return self._assign_missing_refs_locked()
+
+    def resolve(self, token: str) -> str:
+        """The job id for a full id or a short reference (``J3``, case-insensitive). Read-only.
+
+        Unknown or ambiguous references are refused rather than guessed.
+        """
+        text = token.strip()
+        if JOB_ID_PATTERN.match(text):
+            return text
+        match = re.fullmatch(r"[Jj]([1-9]\d{0,8})", text)
+        if match is None:
+            raise ValidationError(
+                f"{token!r} is neither a job reference like J3 nor a job id like ff-YYYYMMDD-xxxxxx"
+            )
+        ref = f"J{match.group(1)}"
+        jobs, problems = self.list_jobs()
+        owners = [j.job_id for j in jobs if j.ref == ref]
+        if len(owners) > 1:
+            raise ValidationError(f"{ref} is ambiguous ({', '.join(owners)}); use the full id")
+        if not owners:
+            known = ", ".join(j.ref for j in jobs if j.ref) or "none"
+            hint = f"; {len(problems)} unreadable job record(s)" if problems else ""
+            raise ValidationError(f"no job {ref} in this repository (known: {known}){hint}")
+        return owners[0]
 
     def update(
         self,
@@ -1264,6 +1336,7 @@ def _protected_fields(job: Job) -> tuple[Any, ...]:
         job.lease.to_dict() if job.lease else None,
         job.attempts.to_dict(),
         job.job_id,
+        job.ref,
         job.policy.to_dict(),
         job.repo.to_dict(),
         job.worktree.to_dict() if job.worktree else None,
