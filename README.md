@@ -48,7 +48,7 @@ Idea -> Discover -> Design -> HUMAN APPROVES PLAN
 
 ## Interfaces
 
-The user-facing name is **ForgeFlow**. Its short entry points are `/forge` for Claude Code and `$forge` for Codex, provided as repository-scoped skills. Both were invoked successfully in the real clients during Checkpoint A. The underlying CLI is `forgeflow` (`python -m forgeflow`); it is not named `forge` because that name collides with other common tools.
+The user-facing name is **ForgeFlow**. Its short entry points are `/forge` for Claude Code and `$forge` for Codex, provided as repository-scoped skills. Both were invoked successfully in the real clients during Checkpoint A. The underlying CLI is `forgeflow` (run it as `py -3.13 -m forgeflow` on Windows; Python 3.13+ required, see [getting started](docs/getting-started.md)); it is not named `forge` because that name collides with other common tools.
 
 | Operation | Status |
 | --- | --- |

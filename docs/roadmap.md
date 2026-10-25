@@ -29,7 +29,7 @@ The first complete implementation target is **[MVP v0.1](mvp-scope.md)**. Work s
 - [x] Verify Claude Code, Codex CLI, Git, GitHub CLI, Windows and available skills without installing dependencies silently (`forgeflow doctor`; MCP detection deferred to Checkpoint D)
 - [x] Confirm real `/forge` / `$forge` invocation mechanics: repository-scoped skills verified in Claude Code 2.1.310 and Codex 0.164.0; installation into other repositories still open
 - [x] Implement minimal durable job state, one-job locking, isolated worktree and non-destructive resume ([ADR 0003](decisions/0003-runtime-state-and-worktrees.md))
-- [ ] Configure/link a GitHub Project and define ID traceability. Done: job ↔ issue ↔ Project item ↔ branch ↔ PR contract. Blocked: the Project could not be discovered because the token lacks `read:project`
+- [ ] Configure/link a GitHub Project and define ID traceability. Done: job ↔ issue ↔ Project item ↔ branch ↔ PR contract. The Project is now discoverable (`read:project` granted; `doctor` sees #2 ForgeFlow Development, 2026-10-25). Previously blocked because the token lacked `read:project`
 
 ### Checkpoint B — Discovery and plan approval
 
