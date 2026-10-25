@@ -31,6 +31,7 @@ __pycache__/
 .mypy_cache/
 .venv/
 venv/
+*.egg-info/
 
 # JavaScript package/build output
 node_modules/

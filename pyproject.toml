@@ -1,0 +1,56 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "forgeflow"
+version = "0.1.0.dev0"  # unreleased development version; see CHANGELOG.md
+description = "Human-guided, multi-model AI software factory for Claude Code, Codex and GitHub (pre-alpha)"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.10"
+authors = [{ name = "Pedro de Jesus" }]
+dependencies = []  # standard library only
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Environment :: Console",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: Software Development",
+]
+
+[project.urls]
+Repository = "https://github.com/PDJ-E/ForgeFlow"
+Changelog = "https://github.com/PDJ-E/ForgeFlow/blob/main/CHANGELOG.md"
+
+[project.scripts]
+forgeflow = "forgeflow.cli:main"
+
+[tool.setuptools]
+packages = ["forgeflow"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM", "S"]
+ignore = [
+    "S603",  # subprocess with argv lists is the intended, shell-free pattern
+    "S607",  # git/gh/claude/codex are resolved from PATH by design
+    "SIM105",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S101", "S106", "S108", "B017", "SIM117"]
+
+[tool.mypy]
+python_version = "3.10"
+strict = true
+files = ["forgeflow", "tests"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

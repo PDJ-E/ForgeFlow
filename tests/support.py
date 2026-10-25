@@ -1,0 +1,217 @@
+"""Shared test fixtures: throwaway git repositories with isolated git configuration."""
+
+from __future__ import annotations
+
+import json
+import os
+import shutil
+import stat
+import subprocess
+import tempfile
+import unittest
+from collections.abc import Callable, Mapping, Sequence
+from pathlib import Path
+from typing import Any
+from unittest import mock
+
+from forgeflow.gitrepo import discover_identity
+from forgeflow.jobs import Approval, Job, JobState, Policy, PullRequestLink, Repo, utc_now
+from forgeflow.proc import DEFAULT_TIMEOUT, CommandResult
+from forgeflow.store import JobStore
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _on_rm_error(func: Callable[..., object], path: str, _exc: object) -> None:
+    # Git marks object files read-only; Windows refuses to delete those.
+    os.chmod(path, stat.S_IWRITE)
+    func(path)
+
+
+def rmtree(path: Path) -> None:
+    shutil.rmtree(path, onerror=_on_rm_error)
+
+
+def run_git(repo: Path, *args: str) -> str:
+    out = subprocess.run(
+        ["git", "-C", str(repo), *args],
+        check=True,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
+    return out.stdout.rstrip()  # keep leading columns, e.g. porcelain " M"
+
+
+class GitRepoTestCase(unittest.TestCase):
+    """Each test gets a fresh repository whose ``origin/main`` points at the initial commit."""
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp(prefix="forgeflow-test-"))
+        self.addCleanup(rmtree, self.tmp)
+        gitconfig = self.tmp / "gitconfig"
+        gitconfig.write_text(
+            "[user]\n\tname = ForgeFlow Test\n\temail = test@example.invalid\n"
+            "[init]\n\tdefaultBranch = main\n[core]\n\tautocrlf = false\n"
+            "[commit]\n\tgpgsign = false\n",
+            encoding="utf-8",
+        )
+        env = mock.patch.dict(
+            os.environ,
+            {
+                "GIT_CONFIG_GLOBAL": str(gitconfig),
+                "GIT_CONFIG_NOSYSTEM": "1",
+                "PYTHONPATH": str(PROJECT_ROOT),
+            },
+        )
+        env.start()
+        self.addCleanup(env.stop)
+
+        self.repo = self.tmp / "repo"
+        self.repo.mkdir()
+        run_git(self.repo, "init", "-q", "-b", "main")
+        (self.repo / "README.md").write_text("# demo\n", encoding="utf-8")
+        (self.repo / "docs").mkdir()
+        (self.repo / "docs" / "plan.md").write_text("# Plan\n\nAdd a greeting.\n", encoding="utf-8")
+        run_git(self.repo, "add", "-A")
+        run_git(self.repo, "commit", "-q", "-m", "initial")
+        run_git(self.repo, "remote", "add", "origin", "https://github.com/example/demo.git")
+        run_git(self.repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+        run_git(self.repo, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main")
+        self.store = JobStore.for_repo(self.repo, lock_timeout=5)
+
+    # --- job helpers -----------------------------------------------------------------------
+
+    def repo_record(self) -> Repo:
+        ident = discover_identity(self.repo)
+        return Repo(
+            root=ident.root,
+            slug=ident.slug,
+            remote_url=ident.remote_url,
+            base_branch=ident.base_branch,
+        )
+
+    def new_job(
+        self,
+        title: str = "Add a greeting",
+        builder: str = "mock",
+        reviewer: str | None = "mock-reviewer",
+    ) -> Job:
+        return self.store.create(title, self.repo_record(), Policy(builder, reviewer))
+
+    def approval_for(self, job: Job, method: str = "test-fixture") -> Approval:
+        assert job.plan.sha256 is not None
+        return Approval(
+            gate="plan",
+            approver="test-owner",
+            approved_at=utc_now(),
+            subject_sha256=job.plan.sha256,
+            method=method,
+        )
+
+    def approved_job(self, **kwargs: str | None) -> Job:
+        job = self.new_job(**kwargs)  # type: ignore[arg-type]
+        job = self.store.submit_plan(job.job_id, "docs/plan.md")
+        return self.store.transition(
+            job.job_id, JobState.PLAN_APPROVED, approval=self.approval_for(job)
+        )
+
+    def ready_job(self, issue_number: int = 7, **kwargs: str | None) -> Job:
+        from forgeflow.github import GitHubClient, link_issue
+        from forgeflow.worktree import WorktreeManager, prepare_job_worktree
+
+        job = self.approved_job(**kwargs)
+        prepare_job_worktree(self.store, WorktreeManager(self.repo), job.job_id)
+        fake = FakeGitHub({issue_number: "OPEN"})
+        link_issue(self.store, job.job_id, issue_number, GitHubClient(runner=fake))
+        return self.store.transition(job.job_id, JobState.READY)
+
+    def link_draft_pr(self, job_id: str, number: int = 42) -> Job:
+        def apply(j: Job) -> None:
+            j.github.pull_request = PullRequestLink(
+                number=number,
+                url=f"https://github.com/example/demo/pull/{number}",
+                is_draft=True,
+                state="OPEN",
+            )
+
+        return self.store.update(job_id, apply, event="pr-linked")
+
+
+class FakeGitHub:
+    """Stands in for `gh api graphql`. Issues map number -> state; PR numbers are not issues."""
+
+    def __init__(
+        self,
+        issues: Mapping[int, str],
+        *,
+        project_scope: bool = True,
+        project_items: Sequence[dict[str, object]] | None = None,
+    ) -> None:
+        self.issues = dict(issues)
+        self.project_scope = project_scope
+        self.project_items = (
+            list(project_items)
+            if project_items is not None
+            else [
+                {
+                    "id": "PVTI_test",
+                    "project": {
+                        "number": 1,
+                        "title": "ForgeFlow",
+                        "url": "https://github.com/users/example/projects/1",
+                    },
+                    "fieldValueByName": {"name": "Todo"},
+                }
+            ]
+        )
+        self.calls: list[tuple[str, ...]] = []
+
+    def __call__(
+        self,
+        argv: Sequence[str],
+        *,
+        cwd: Path | None = None,
+        timeout: float = DEFAULT_TIMEOUT,
+        input_text: str | None = None,
+        env: Mapping[str, str] | None = None,
+    ) -> CommandResult:
+        self.calls.append(tuple(argv))
+        args = dict(a.split("=", 1) for a in argv if "=" in a and not a.startswith("query="))
+        query = next(a for a in argv if a.startswith("query="))
+        number = int(args["number"])
+        if "projectItems" in query:
+            if not self.project_scope:
+                body: dict[str, Any] = {
+                    "errors": [
+                        {
+                            "type": "INSUFFICIENT_SCOPES",
+                            "message": "The 'projectItems' field requires one of the "
+                            "following scopes: ['read:project']",
+                        }
+                    ]
+                }
+                return CommandResult(tuple(argv), 1, json.dumps(body), "gh: insufficient scopes")
+            nodes = self.project_items if number in self.issues else []
+            body = {"data": {"repository": {"issue": {"projectItems": {"nodes": nodes}}}}}
+            return CommandResult(tuple(argv), 0, json.dumps(body), "")
+        if number not in self.issues:
+            body = {
+                "data": {"repository": {"issue": None}},
+                "errors": [
+                    {
+                        "type": "NOT_FOUND",
+                        "message": f"Could not resolve to an Issue with the number of {number}.",
+                    }
+                ],
+            }
+            return CommandResult(tuple(argv), 1, json.dumps(body), "gh: not found")
+        issue = {
+            "id": f"I_kw{number}",
+            "number": number,
+            "url": f"https://github.com/{args['owner']}/{args['name']}/issues/{number}",
+            "title": f"Issue {number}",
+            "state": self.issues[number],
+        }
+        body = {"data": {"repository": {"issue": issue}}}
+        return CommandResult(tuple(argv), 0, json.dumps(body), "")
