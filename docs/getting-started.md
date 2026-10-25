@@ -75,6 +75,8 @@ Pitfalls found while verifying, which Checkpoint C's provider runner must handle
 
 The flow is **idea → discovery → design → your approval → GitHub issue on the Project**. Nothing in it writes code or starts a builder. Design rationale and the threat model: [ADR 0004](decisions/0004-planning-workflow-and-gate-a.md).
 
+Jobs have a short reference, `J1`, `J2`, …, shown by every command and accepted anywhere a job is expected (as is the full id `ff-YYYYMMDD-xxxxxx`). References are unique within this clone and never reused; the full id stays the identifier for branches, logs and GitHub. Jobs created before references existed get one the next time a command changes them; `status` itself never writes.
+
 ### 1. Bind the GitHub Project (once per clone)
 
 ```powershell
@@ -111,7 +113,7 @@ Open **your own** terminal (PowerShell or Windows Terminal) in the repository an
 py -3.13 -m forgeflow approve <job>
 ```
 
-It prints the plan, its version and sha256, the target repository and its visibility, the Project and Status, and what approval does **not** allow. Type the one-time code it shows to approve; anything else cancels. It then publishes the issue and Project item (step 5). Add `--no-handoff` to only record the approval, or `--issue N` to link an existing issue instead of creating one.
+It prints the plan, its version and sha256, the target repository and its visibility, the Project and Status, and what approval does **not** allow, then asks `Approve plan v1 of J3 (sha256 …)? [y/N]`. Only `y` or `yes` approves; Enter (the default, No), anything else, Ctrl+C or end of input cancels and records nothing. Keys pressed while the plan was scrolling are discarded before the question, so they cannot answer it. It then publishes the issue and Project item (step 5). Add `--no-handoff` to only record the approval, or `--issue N` to link an existing issue instead of creating one.
 
 `approve` refuses (exit code 3, nothing recorded) unless both its input and output are an interactive console. So it cannot be run by Claude Code's Bash or PowerShell tools, by `codex exec`, through a pipe, or from Claude Code's `!` prefix. That is deliberate. A changed plan, or a resubmission while you read, is refused as well. The limits of this protection are in [ADR 0004](decisions/0004-planning-workflow-and-gate-a.md#gate-a-a-human-at-an-interactive-console).
 
@@ -123,7 +125,8 @@ It prints the plan, its version and sha256, the target repository and its visibi
 
 - **Claude Code:** verified end to end on 2026-10-25 (see [ADR 0004](decisions/0004-planning-workflow-and-gate-a.md#verification-in-the-real-hosts-2026-10-25)). Approve in a separate terminal window, not with `!`.
 - **Codex skills:** Codex reads skills from `~/.agents/skills` (user) and `<repo>/.agents/skills`. Adapted copies of Anthropic's skills there (for example `pm-brainstorm`, `eng-system-design`) are recognised by the `source-package` / `source-skill` provenance in their `SKILL.md`; `forgeflow skills --host codex` lists them with the `$name` to invoke. Verified 2026-10-25: `$forge idea` loaded `$pm-brainstorm`.
-- **Codex on Windows:** with `[windows] sandbox = "elevated"` in `~/.codex/config.toml`, Codex runs commands as the local user `CodexSandboxOffline`, which cannot read a Python installed only for your user. `$forge` then cannot run ForgeFlow at all. Either start Codex with `-c 'windows.sandbox="unelevated"'` (verified), or install Python 3.13 for all users. ForgeFlow does not change your Codex configuration. `init` and `handoff` need network access, which Codex's sandbox may block; run them in your own terminal (approval already performs the handoff).
+- **Codex on Windows:** with `[windows] sandbox = "elevated"` in `~/.codex/config.toml`, Codex runs commands as the local user `CodexSandboxOffline`, which cannot read a Python installed only for your user. `$forge` then cannot run ForgeFlow at all. Set `sandbox = "unelevated"` in your Codex configuration or start Codex with `-c 'windows.sandbox="unelevated"'` (both verified), or install Python 3.13 for all users to keep the elevated sandbox. ForgeFlow does not change your Codex configuration. `init` and `handoff` need network access, which Codex's sandbox may block; run them in your own terminal (approval already performs the handoff).
+- **Project automations:** GitHub Project workflows run after ForgeFlow and can change an item's Status. On ForgeFlow Development the enabled "Item closed" workflow moved the closed test item to `Building`. `forgeflow handoff` reports the Status it observes on each run.
 - **Windows path length:** plan snapshots are named by their 64-character hash. If the repository's path is very long (roughly 150+ characters), enable Windows long paths or use a shorter location.
 
 ## Running the tests
@@ -152,6 +155,7 @@ The suite creates throwaway git repositories under `%TEMP%` with an isolated git
 | `test_discovery`, `test_design` | Store, files, versions, hashes, interrupted writes | — |
 | `test_approval` | Gate A: ceremony, refusals, races, a **real non-interactive child process**, dispatch prevention | The human at the console (`ScriptedConsole`, patched in only by tests) |
 | `test_handoff` | Store, idempotency and recovery logic | **All GitHub calls** (`tests/fake_github.py`, a stateful fake `gh`) |
+| `test_refs` | Short references: allocation (also from parallel threads), no reuse, resolution, backfill, read-only `status` | — |
 | `test_hostskills` | Plugin and skill discovery | `claude plugin list` output, a temporary Codex home |
 
 Opt-in tests that make **real, read-only** calls:

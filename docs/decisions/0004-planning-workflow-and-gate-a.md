@@ -33,7 +33,7 @@ The constraints are local single-user software on Windows first, stdlib-only Pyt
 
 - `JobStore.transition()` refuses `plan_approved`. The only path is `forgeflow.approval.approve_plan`, the code behind `forgeflow approve`.
 - It runs only when **both** stdin and stdout are an interactive console. On Windows that means `GetConsoleMode` succeeds on both handles; `os.isatty` is not used, because it reports `NUL` as a terminal. On POSIX it means `isatty` on both. Otherwise it exits with code 3 before showing or recording anything.
-- It shows the full plan from the snapshot, the version, the sha256, the task summary, what approval authorises (the target repository, its visibility and the Project/Status) and what it does not authorise. The human must type a fresh one-time code.
+- It shows the full plan from the snapshot, the version, the sha256, the task summary, what approval authorises (the target repository, its visibility and the Project/Status) and what it does not authorise. It then asks `Approve plan vN of Jn (sha256 …)? [y/N]`, after discarding any console input typed before the question. Only `y` or `yes` approves; everything else, including Enter, end of input and Ctrl+C, cancels without writing.
 - The decision is committed against the job revision that was displayed (compare-and-swap), after the store re-hashes the plan file and the snapshot. An edit or resubmission made while the human reads is refused.
 - The record names the method `interactive-console` and the approved version. The store refuses any other method when entering `plan_approved`, and again at every later boundary: handoff, `ready` and each `building` dispatch. So an approval written by hand into `job.json` with another method stops at the next boundary.
 
@@ -41,7 +41,7 @@ The constraints are local single-user software on Windows first, stdlib-only Pyt
 
 It does **not** stop a same-user process that deliberately defeats it. Such a process could drive a pseudo-console (ConPTY, `script`, `pexpect`), call the private recording function, write `job.json` with the expected method, or automate the screen or keyboard. Operating-system users and processes give no stronger local separation without elevation or a second factor. ForgeFlow is local single-user software, not an authentication service. Users who run agents with unrestricted tool permissions should know an agent determined to forge an approval can do so. The audit log and the issue's trace footer make such a forgery visible, but they do not prevent it.
 
-The one-time code guards against accidental approval (a stray Enter, a pasted script); it is not the security property.
+The confirmation guards against accidents, not against an adversary. The first implementation asked for a random one-time code; it was replaced by `y/N` after the live test because it added friction without security. Anything able to drive a real console can also read a code off the screen. Its one real benefit, ignoring keys typed or pasted before the prompt, is kept by flushing pending input (`FlushConsoleInputBuffer` on Windows, `tcflush` on POSIX) before asking.
 
 ### Handoff: GitHub becomes the source of truth
 
@@ -59,6 +59,10 @@ Gate A is re-verified before every write, a per-job OS lock stops concurrent han
 The job stays `plan_approved` with no worktree, and its builder stays `unassigned`. A lease cannot be taken for an unassigned builder. Checkpoint C assigns the builder, prepares the worktree and moves the job to `ready`.
 
 `approve` runs the handoff right after recording the approval, in the human's terminal. If it fails, the approval stands and `forgeflow handoff <job>` retries safely.
+
+### Short job references
+
+People refer to jobs as `J1`, `J2`, …; the full id (`ff-YYYYMMDD-xxxxxx`) remains the identifier for directories, branches (`forge/<id>`), the event log and the GitHub trace marker. References are allocated under the state lock from a counter in `.forge/runtime/refs.json`. The counter is saved before a reference is used, so a crash may skip a number but never hands one out twice, and a deleted job keeps its number. The next number is never below one already on disk. Every command accepts either form, case-insensitively. Unknown references are refused with the known ones listed, and ambiguous ones (only possible through hand edits) are refused too. Jobs created before references existed receive theirs, in creation order, the next time a writing command runs; `status` stays read-only. References are local to one clone, which matches where job state lives (ADR 0003); anything shared across machines or published to GitHub uses the full id and the issue number. Plan tasks keep `T1`, `T2`, … inside each plan.
 
 ### Hosts: one runtime, thin adapters
 
@@ -80,7 +84,14 @@ Claude Code 2.1.310 and Codex CLI 0.164.0 on Windows 11, with a disposable repos
   - First run, before the skills were installed: `$forge idea` found no Product Management or Engineering skills and used the fallback guidance. It recorded outcomes, designed and submitted a plan, and declined to approve.
   - After the owner installed Codex adaptations of the Engineering, Product Management and Productivity skills in `~/.agents/skills` (22 skills: `pm-*`, `eng-*`, `productivity-*`, each carrying its Anthropic provenance), `forgeflow skills --host codex` reports the same canonical skills as Claude Code. In a fresh run, `$forge idea` selected `$pm-brainstorm` from that output, loaded its `SKILL.md` and references, and ran discovery with it, without the fallback.
   - A direct `forgeflow approve` was refused.
-  - **Finding:** with this machine's `[windows] sandbox = "elevated"`, Codex runs commands as the local user `CodexSandboxOffline`. That user cannot read a Python installed only for the current user, so neither `python` nor `py -3.13` runs ForgeFlow. The run above used `codex exec -c 'windows.sandbox="unelevated"'`, a per-invocation override. Installing Python 3.13 for all users is the alternative. ForgeFlow changes no Codex configuration.
+  - **Finding:** with this machine's `[windows] sandbox = "elevated"`, Codex runs commands as the local user `CodexSandboxOffline`. That user cannot read a Python installed only for the current user, so neither `python` nor `py -3.13` runs ForgeFlow. The run above used `codex exec -c 'windows.sandbox="unelevated"'`, a per-invocation override. Installing Python 3.13 for all users is the alternative. ForgeFlow changes no Codex configuration. The owner later set `sandbox = "unelevated"`; a plain `codex exec -s workspace-write` then ran `py -3.13` (3.13.3) without any override.
+- **Live GitHub handoff** (PDJ-E/ForgeFlow and ForgeFlow Development, authorised by the owner, with a synthetic, clearly labelled plan):
+  - The owner approved job `ff-20261025-232896` at a console.
+  - The handoff created issue #4, added it to the Project and set Status Ready. The job recorded the issue, the item and the handoff.
+  - The handoff was re-run twice, once through a logging runner. It made five read-only queries and no write: no duplicate issue or item.
+  - The job, created before short references, received `J1` on that run and resolved from `J1`, `j1` and its full id.
+  - Issue #4 was then closed with a verification comment and its item archived.
+  - The Project's own "Item closed" workflow then changed the archived item's Status to `Building` (`github-project-automation[bot]`, three seconds after the close). ForgeFlow made no write. No other issue, pull request, branch, Project field or setting changed.
 - **Local channels:** `forgeflow approve` was refused from Git Bash with a pipe, with piped input, under `winpty` (stdin not a tty) and from the PowerShell tool. The PowerShell tool's stdin is `NUL`; there `sys.stdin.isatty()` returned `True`, but `GetConsoleMode` returned `False`.
 
 ## Consequences
@@ -88,6 +99,8 @@ Claude Code 2.1.310 and Codex CLI 0.164.0 on Windows 11, with a disposable repos
 - The plan, its version and hash, the approval and the issue are linked in both directions: the job records the issue and Project item, and the issue carries the job id and plan hash.
 - The job schema is version 2 (plan version and submission time, approved version, handoff record). Version 1 records still load and are upgraded when next written.
 - A Checkpoint A job could link an issue while still a draft; linking now requires an approved plan.
+- GitHub Project workflows ("Item added to project", "Item closed") run after ForgeFlow and can change the Status it set. ForgeFlow never overrides a Status it finds already set, and it reports the Status it observes.
+- In the issue footer, ForgeFlow links the Project by its URL, because GitHub turns "#N" into a link to issue or pull request N. `design check` warns when a plan writes "Project #N".
 - Approval needs a real terminal, which is the intended friction. A Claude Code `!` command or any agent tool call cannot approve.
 - Windows `MAX_PATH`: a plan snapshot's path includes a 64-character hash, so a repository nested very deep (about 150 characters of root path or more) can exceed 260 characters unless Windows long paths are enabled.
 

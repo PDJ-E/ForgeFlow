@@ -89,8 +89,9 @@ shell) in this repository and run:
 
     py -3.13 -m forgeflow approve <job>        (python3.13 -m forgeflow approve <job> elsewhere)
 
-It shows the exact plan version, its hash and what approval authorises, asks them to type a
-one-time code, then records the approval and publishes the issue to the bound GitHub Project.
+It shows the exact plan version, its hash and what approval authorises, asks
+`Approve plan vN of Jn? [y/N]`, then records the approval and publishes the issue to the bound
+GitHub Project.
 If it is run without an interactive console it exits with code 3 and records nothing.
 
 ## handoff
