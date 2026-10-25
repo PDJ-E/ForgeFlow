@@ -28,7 +28,7 @@ The console script is **`forgeflow`**, not `forge`. `forge` is already a common 
 ### Job state
 
 - Location: `<main checkout>/.forge/runtime/jobs/<job-id>/`. The directory writes its own `.gitignore` containing `*`, so it is never committed even in repositories whose `.gitignore` does not know about ForgeFlow. The host repository's files are not edited.
-- `job.json` holds a versioned (`schema_version: 1`), validated snapshot. Every write goes to a temporary file in the same directory, is fsynced and is swapped in with `os.replace`. On Windows the replace is retried with backoff when a reader, indexer or antivirus scanner holds the file open. It never falls back to a non-atomic write.
+- `job.json` holds a versioned (`schema_version: 2` since Checkpoint B, which still reads version 1), validated snapshot. Every write goes to a temporary file in the same directory, is fsynced and is swapped in with `os.replace`. On Windows the replace is retried with backoff when a reader, indexer or antivirus scanner holds the file open. It never falls back to a non-atomic write.
 - `events.jsonl` is an append-only audit trail of transitions, approvals, leases and evidence. A torn final line from a crash is isolated, not propagated.
 - `evidence/` holds machine-readable results. Each record carries `mocked: true|false`.
 - Each record carries a `revision` counter, so writers holding stale data are rejected (compare-and-swap).
@@ -74,7 +74,7 @@ Thin adapters at `.claude/skills/forge/SKILL.md` (Claude Code, `disable-model-in
 - `git clean -ffdx` in the main checkout can delete nested worktrees and runtime state (a single `-f` skips them). Moving worktrees outside the checkout stays an option if this proves to be a practical risk.
 - **PID reuse:** a recorded provider PID now carries its start time, so a reused PID is recognised and does not block recovery. When the start time cannot be read (macOS, or a process the user may not query), a live PID fails closed. `JobStore.force_release_lease` (audited, reason required) is the human override, and it refuses while the recorded process is verifiably still running.
 - **POSIX containment:** a descendant that calls `setsid()` leaves the process group and is not killed. `run_command` still returns on time, but that process can survive. Windows Job Objects do not have this gap, because nested processes cannot break away unless the job allows it. Closing it on Linux would need cgroups.
-- **Gate A strength:** the approval record and hash binding are enforced in code. Capturing the approval through a channel an agent cannot drive (Checkpoint B) is not done yet, so the library API can still be called by any local process. This is local, single-user tooling, not a multi-user security boundary.
+- **Gate A strength:** the approval record and hash binding are enforced in code. Since Checkpoint B, `transition()` refuses `plan_approved`; approvals are captured only by `forgeflow approve` from a human at an interactive console, and only that method is accepted at later boundaries. The threat model and its limits are in [ADR 0004](0004-planning-workflow-and-gate-a.md). This is local, single-user tooling, not a multi-user security boundary.
 - If a crash lands between `git worktree add` and recording it, the next attempt refuses the unrecorded worktree, and a human must inspect it. ForgeFlow does not guess ownership.
 
 ## Amendments

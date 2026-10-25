@@ -31,15 +31,29 @@ All the above documentation was introduced as the project's initial foundation i
   - Repository-scoped `/forge` (Claude Code) and `$forge` (Codex) skills, limited to `doctor` and `status`.
   - [ADR 0003](docs/decisions/0003-runtime-state-and-worktrees.md), the [getting started](docs/getting-started.md) guide, a test suite (unit, cross-process interruption and mocked lifecycle tests) and CI on Windows and Ubuntu.
 
-**No discovery flow, plan-approval UI, real Claude/Codex execution, issue/PR creation, dashboard or knowledge adapter has been implemented yet.**
+- **Checkpoint B: discovery, design and plan approval** (pre-alpha, unreleased):
+  - `forgeflow idea` and `/forge idea` / `$forge idea`: interactive discovery whose outcomes (requirements, decisions, rejected options, questions, risks...) are kept with a status history in a private `discovery.json`, can be refined, rejected or reinstated, and resume across sessions.
+  - `forgeflow design` and `/forge design`: one Markdown plan per job, prefilled from the discovery, validated (`design check`), and pinned as numbered, hashed versions (`design submit`, `design revise`).
+  - `forgeflow approve` (Gate A): shows the exact plan version, its sha256 and what approval does and does not authorise, and records the approval only after the human types a one-time code at an interactive console. It is bound to the version shown and refused if the plan changed.
+  - `forgeflow handoff`: publishes the approved plan as one GitHub issue on the bound Project in its Ready status, with a trace marker; idempotent across retries and interruptions, never overrides a status set on the board, and never publishes discovery notes.
+  - `forgeflow init` binds a GitHub Project after checking its Status field; `forgeflow skills` discovers the Product Management and Engineering skills each host can use.
+  - [ADR 0004](docs/decisions/0004-planning-workflow-and-gate-a.md), with the Gate A threat model and verification in the real Claude Code and Codex hosts.
+
+**No real Claude/Codex builder execution, branch or PR creation, dashboard or knowledge adapter has been implemented yet.**
 
 ### Changed
 
 - **Python 3.13 is now the minimum supported version** (previously 3.10, chosen when the pilot machine had only 3.10). `requires-python`, Ruff (`py313`), mypy (`3.13`), `forgeflow doctor` and a runtime check in `forgeflow/__init__.py` agree, and a test keeps them in agreement. Older interpreters get a message naming the interpreter and the `py -3.13` command. CI now tests Python 3.13 and 3.15 on Windows and Ubuntu, and a `CI OK` job aggregates the results for branch protection.
 - Developer tools (Ruff, mypy, optional pytest) are pinned in `pyproject.toml` dependency groups (`lint`, `dev`) and are never runtime dependencies. No virtual environment is required. The docs name the interpreter explicitly (`py -3.13` on Windows) because a bare `python` may resolve to an older install.
 - GitHub Project access is verified. With `read:project` granted, `doctor` reports the linked Project (#2 ForgeFlow Development) instead of the earlier scope blocker.
+- The job record is schema version 2 (plan version, approved version, handoff record). Version 1 records still load and are upgraded on their next write.
+- Linking a GitHub issue to a job now requires an approved plan; drafts stay discussion-only.
+- Jobs started by discovery have no builder (`unassigned`), and no worker lease can be taken for them until a builder is assigned (Checkpoint C).
+- The `/forge` and `$forge` adapters cover the planning workflow, share one command table (checked by a test) and never run `approve`.
 
 ### Security
+
+- Gate A can no longer be passed through the library: `transition()` refuses `plan_approved`, and only approvals captured by `forgeflow approve` at an interactive console (Windows `GetConsoleMode` on both stdin and stdout, which also rejects `NUL`) are accepted, then re-checked at handoff, `ready` and every dispatch. Agent tool calls in Claude Code and Codex were verified to be refused. The limits of this local protection are documented in ADR 0004.
 
 Fixes for eight defects found by an independent review of [PR #3](https://github.com/PDJ-E/ForgeFlow/pull/3), each covered by a regression test that failed against the previous code:
 
