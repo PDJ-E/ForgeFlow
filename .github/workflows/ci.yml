@@ -1,0 +1,68 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: tests (${{ matrix.os }}, Python ${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+        python: ["3.13", "3.15"]  # supported floor and newest stable release
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Unit, lifecycle and cross-process tests (stdlib unittest, no dependencies)
+        run: python -m unittest discover -s tests -t . -v
+      - name: Build, install and run the console script
+        shell: bash
+        run: |
+          python -m pip wheel . --no-deps -w dist
+          python -m venv .ci-venv
+          if [ -d .ci-venv/Scripts ]; then BIN=.ci-venv/Scripts; else BIN=.ci-venv/bin; fi
+          "$BIN/python" -m pip install dist/*.whl
+          "$BIN/forgeflow" --version
+          "$BIN/forgeflow" status
+          "$BIN/forgeflow" doctor --offline
+
+  static:
+    name: lint and types (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: python -m pip install --group lint  # pinned in pyproject.toml [dependency-groups]
+      - run: python -m ruff check .
+      - run: python -m ruff format --check .
+      - run: python -m mypy
+
+  ci-ok:
+    name: CI OK
+    if: ${{ always() }}
+    needs: [test, static]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check results of required jobs
+        run: |
+          echo "test:   ${{ needs.test.result }}"
+          echo "static: ${{ needs.static.result }}"
+          if [ "${{ needs.test.result }}" != "success" ] || [ "${{ needs.static.result }}" != "success" ]; then
+            echo "One or more required jobs failed, were cancelled, or were skipped."
+            exit 1
+          fi
