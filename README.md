@@ -2,7 +2,7 @@
 
 **A human-guided, multi-model AI software factory for Claude Code, Codex, and GitHub.**
 
-> **Status: design / pre-alpha.** ForgeFlow is a proposed open-source project. No working `/forge` command, CLI, installer, autonomous pipeline, or supported integration has been released yet. The documents in this repository record design decisions and a proposed roadmap, not shipped features.
+> **Status: pre-alpha, unreleased.** The code currently provides Checkpoint A, a tested execution harness. It covers environment inspection, durable job state, worktree isolation, provider detection, GitHub issue linkage and read-only `status`. **No autonomous pipeline exists yet:** ForgeFlow does not run Claude or Codex on code, create issues or PRs, or merge. Nothing has been released. See [getting started](docs/getting-started.md).
 
 ## Why ForgeFlow?
 
@@ -46,17 +46,28 @@ Idea -> Discover -> Design -> HUMAN APPROVES PLAN
 - **Safe self-improvement:** collect evidence and propose tested process improvements; do not silently rewrite installed skills or security policies.
 - **Optional Knowledge Management:** access project-scoped Markdown and optionally existing Obsidian MCP; keep user-owned vaults independent and require authorization for changes.
 
-## Intended interfaces (not implemented)
+## Interfaces
 
-The proposed user-facing name is **ForgeFlow** with a short entry point, `/forge` for Claude Code and, where supported, `$forge` for Codex. Exact syntax, distribution packaging, and command collision behavior must be validated before release.
+The user-facing name is **ForgeFlow**. Its short entry points are `/forge` for Claude Code and `$forge` for Codex, provided as repository-scoped skills. Both were invoked successfully in the real clients during Checkpoint A. The underlying CLI is `forgeflow` (run it as `py -3.13 -m forgeflow` on Windows; Python 3.13+ required, see [getting started](docs/getting-started.md)); it is not named `forge` because that name collides with other common tools.
 
-Potential operations include exploring ideas, designing solutions, approving plans, running approved jobs, reviewing results, inspecting status, and proposing lessons.
+| Operation | Status |
+| --- | --- |
+| `doctor`: environment, GitHub and provider inspection | implemented (read-only) |
+| `status`: local job state | implemented (read-only) |
+| `init`, `idea`, `design`, `approve` | planned, Checkpoint B |
+| `run`, `review`, `rework`, `resume` with real providers | planned, Checkpoint C |
+| knowledge sources (Markdown, optional Obsidian MCP) | planned, Checkpoint D |
+| `learn` | after v0.1 |
+
+Packaging the skills for use in other repositories has not been validated yet.
 
 ## Architecture and roadmap
 
 - [Architecture and current design boundaries](docs/architecture.md)
 - [ADR 0001 — GitHub Projects and local execution state](docs/decisions/0001-github-projects-local-state.md)
 - [ADR 0002 — Optional knowledge sources and Obsidian](docs/decisions/0002-knowledge-sources-obsidian.md)
+- [ADR 0003 — Runtime, local job state, locking and worktrees](docs/decisions/0003-runtime-state-and-worktrees.md)
+- [Getting started (Checkpoint A, Windows)](docs/getting-started.md)
 - [MVP v0.1 scope and acceptance criteria](docs/mvp-scope.md)
 - [Development roadmap](docs/roadmap.md)
 - [Changelog and release history](CHANGELOG.md)
