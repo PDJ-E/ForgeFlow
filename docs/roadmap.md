@@ -1,11 +1,11 @@
 # ForgeFlow roadmap
 
-**Status:** agreed design direction; implementation not started.  
-**Last reviewed:** 2026-10-24.
+**Status:** Phase 1 in progress. Checkpoints A ([PR #3](https://github.com/PDJ-E/ForgeFlow/pull/3)) and B ([PR #5](https://github.com/PDJ-E/ForgeFlow/pull/5)) are merged; Checkpoint C is next. Pre-alpha, nothing released.  
+**Last reviewed:** 2026-10-25.
 
 The first complete implementation target is **[MVP v0.1](mvp-scope.md)**. Work should proceed in small reviewable PRs and demonstrate real behavior, not merely produce agent-written design claims.
 
-## Phase 0 — Project foundation (current)
+## Phase 0 — Project foundation (done)
 
 **Goal:** establish a credible, public, MIT-licensed project and its design boundaries.
 
@@ -14,13 +14,13 @@ The first complete implementation target is **[MVP v0.1](mvp-scope.md)**. Work s
 - [x] ADR 0001: GitHub Projects for approved work, local runtime state for execution
 - [x] ADR 0002: optional, scoped knowledge sources and Obsidian integration
 - [x] Explicit MVP v0.1 scope and acceptance tests
-- [ ] Review and merge the foundation documentation PR
-- [ ] Choose and configure a minimal GitHub Project for ForgeFlow development
-- [ ] Review branch protection / repository contribution defaults
+- [x] Review and merge the foundation documentation PR ([PR #1](https://github.com/PDJ-E/ForgeFlow/pull/1), changelog policy in [PR #2](https://github.com/PDJ-E/ForgeFlow/pull/2))
+- [x] Choose and configure a minimal GitHub Project for ForgeFlow development (Project #2 ForgeFlow Development, bound with `forgeflow init --project 2`)
+- [x] Review branch protection / repository contribution defaults: ruleset `Main_PR_Rule` on `main` requires a pull request and the `CI OK` check and blocks force pushes; repository admins can still bypass it
 
 **Exit:** docs are merged, project workflow exists, no false claim that software is already available.
 
-## Phase 1 — MVP v0.1 (first complete implementation assignment)
+## Phase 1 — MVP v0.1 (current)
 
 **Goal:** a single job safely moves from an idea to an owner-approved Pull Request, with optional reusable knowledge context. Build in **five small checkpoints** rather than one giant all-or-nothing change.
 

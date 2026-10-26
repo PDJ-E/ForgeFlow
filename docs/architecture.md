@@ -1,7 +1,7 @@
 # ForgeFlow — architecture and design boundaries
 
-**Status:** design proposal, not an implementation contract.  
-**Last reviewed:** 2026-10-24.
+**Status:** design direction. Checkpoints A and B implement the runtime and the planning workflow ([ADR 0003](decisions/0003-runtime-state-and-worktrees.md), [ADR 0004](decisions/0004-planning-workflow-and-gate-a.md)); the build, review and knowledge parts below are still proposals.  
+**Last reviewed:** 2026-10-25.
 
 ForgeFlow is a human-governed, multi-model software engineering workflow. It should connect idea exploration, product definition, architecture decisions, verified implementation, independent review, and learning while minimizing unnecessary agents and operational complexity.
 
@@ -57,7 +57,7 @@ The factory must distinguish **approving a plan** from **approving the actual PR
 | Architectural decisions / project-facing specs | Version-controlled Markdown (where appropriate) |
 | Approved feature backlog and workflow status | GitHub Projects + Issues |
 | Source history, review, integration | Git branches, commits, PRs, required CI |
-| Agent execution state, logs, usage, transient evidence | Local runtime files (schema TBD) |
+| Agent execution state, logs, usage, transient evidence | Local runtime files under `.forge/runtime/` (job schema version 2; see [ADR 0003](decisions/0003-runtime-state-and-worktrees.md)) |
 | Long-lived knowledge | User-owned Markdown knowledge sources (including Obsidian), with source attribution and project-scoped permissions; code-critical docs stay in the repository |
 | Provider credentials | Host environment/secret managers; never repo files |
 

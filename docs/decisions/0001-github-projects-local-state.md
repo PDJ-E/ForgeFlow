@@ -1,6 +1,6 @@
 # ADR 0001: GitHub Projects for approved work; local state for agent execution
 
-- **Status:** Accepted as a product-design direction; integration not implemented
+- **Status:** Accepted; partly implemented. Local job state is implemented by Checkpoint A ([ADR 0003](0003-runtime-state-and-worktrees.md)). Publishing an approved plan as one issue and Project item is implemented by Checkpoint B ([ADR 0004](0004-planning-workflow-and-gate-a.md)). Pull requests and later Project statuses come with Checkpoint C.
 - **Date:** 2026-10-24
 - **Deciders:** ForgeFlow project owner
 

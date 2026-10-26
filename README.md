@@ -92,7 +92,7 @@ See [ATTRIBUTION.md](ATTRIBUTION.md) for source-level licensing distinctions and
 
 ## Contributing
 
-This project is in the design stage. Technical discussions, architecture critiques, and well-scoped suggestions are welcome through GitHub Issues. Please do not assume any advertised workflow is operational until an implementation and tests are published.
+This project is pre-alpha. Checkpoints A (execution harness) and B (discovery, design, Gate A and GitHub handoff) are implemented and tested; building, review, pull requests and knowledge access are not (see the [roadmap](docs/roadmap.md)). Technical discussions, architecture critiques, and well-scoped suggestions are welcome through GitHub Issues. Please do not assume any advertised workflow is operational until an implementation and tests are published.
 
 If contributing code, keep it original or clearly identify third-party sources and their license obligations. Never include secrets or proprietary material.
 

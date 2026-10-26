@@ -51,6 +51,7 @@ All the above documentation was introduced as the project's initial foundation i
 - Linking a GitHub issue to a job now requires an approved plan; drafts stay discussion-only.
 - Jobs started by discovery have no builder (`unassigned`), and no worker lease can be taken for them until a builder is assigned (Checkpoint C).
 - The `/forge` and `$forge` adapters cover the planning workflow, share one command table (checked by a test) and never run `approve`.
+- The status lines of the roadmap, MVP scope, architecture, README and ADR 0001 now describe the merged Checkpoints A and B instead of "not started" or "design stage". An ADR 0002 amendment records the current pilot vault setup and that it is not the disposable test vault.
 
 ### Fixed
 
