@@ -1,7 +1,7 @@
 # ForgeFlow MVP v0.1 — scope and acceptance criteria
 
-**Status:** approved scope, **partly built**. Checkpoints A (execution harness) and B (discovery, design, Gate A, GitHub handoff) are merged; C (build, review, PR), D (knowledge) and E (acceptance demonstration) are not started. No acceptance criterion has been demonstrated end to end yet. See the [roadmap](roadmap.md).  
-**Date:** 2026-10-24 (status updated 2026-10-25).  
+**Status:** approved scope, **partly built**. Checkpoints A (execution harness) and B (discovery, design, Gate A, GitHub handoff) are merged; C (build, review, PR) is implemented and in review; D (knowledge) and E (acceptance demonstration) are not started. AC-04 to AC-08 and AC-12 are covered by Checkpoint C's tests and its live demonstration ([ADR 0005](decisions/0005-build-review-and-delivery.md#verification)); the formal end-to-end acceptance run is Checkpoint E. See the [roadmap](roadmap.md).  
+**Date:** 2026-10-24 (status updated 2026-10-26).  
 **Goal:** one safe, observable, repeatable end-to-end workflow from an idea to a **human-reviewed PR**, plus a small optional knowledge bridge.
 
 This document is the intended scope boundary for ForgeFlow's **first complete implementation assignment**, not a prompt. Delivery can use incremental internal checkpoints and multiple PRs; no single agent execution is assumed to complete all features reliably. Claims of readiness must be backed by a tested demonstration.
@@ -103,7 +103,7 @@ Status as of 2026-10-25:
 
 - Validate exact `/forge` plugin/skill packaging and `$forge` discovery paths on installed CLI versions. **Partly done:** repository-scoped skills are verified in Claude Code 2.1.310 and Codex CLI 0.164.0 ([getting started](getting-started.md#verified-invocation)); installing them for other repositories is still open.
 - Confirm GitHub Project creation/linking and access using the intended repository and account. **Done:** Project #2 is bound with `forgeflow init --project 2`, and a live handoff created and tracked an issue on it ([ADR 0004](decisions/0004-planning-workflow-and-gate-a.md)).
-- Confirm whether installed Anthropic Product Management / Engineering plugins can be invoked from the relevant Claude Code worker context. **Done for the interactive hosts** (ADR 0004); worker contexts are verified with Checkpoint C.
+- Confirm whether installed Anthropic Product Management / Engineering plugins can be invoked from the relevant Claude Code worker context. **Done for the interactive hosts** (ADR 0004). Builders and reviewers deliberately do not use them: the Claude builder runs with `--restricted` (no plugins, settings or MCP) and works from the approved plan, which already carries the design (ADR 0005).
 - Decide state lock/atomic write behavior on Windows. **Done:** [ADR 0003](decisions/0003-runtime-state-and-worktrees.md).
 - Confirm safe test repo/vault locations, permissions and minimal test commands. **Open:** a disposable test vault is still needed for Checkpoints D and E.
 

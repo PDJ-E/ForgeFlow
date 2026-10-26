@@ -2,7 +2,7 @@
 
 **A human-guided, multi-model AI software factory for Claude Code, Codex, and GitHub.**
 
-> **Status: pre-alpha, unreleased.** The code provides Checkpoint A, a tested execution harness (environment inspection, durable job state, worktree isolation, provider detection, read-only `status`), and Checkpoint B, the planning workflow: interactive discovery, one engineering plan per job, human plan approval (Gate A) and publishing the approved plan as a GitHub issue on your Project. **No autonomous pipeline exists yet:** ForgeFlow does not run Claude or Codex on code, create branches or PRs, or merge. Nothing has been released. See [getting started](docs/getting-started.md).
+> **Status: pre-alpha, unreleased.** The code provides Checkpoint A, a tested execution harness (environment inspection, durable job state, worktree isolation, provider detection, read-only `status`), Checkpoint B, the planning workflow: interactive discovery, one engineering plan per job, human plan approval (Gate A) and publishing the approved plan as a GitHub issue on your Project, and Checkpoint C (in review), running an approved job: Claude Code or Codex builds in an isolated worktree, ForgeFlow runs the repository's checks, a read-only reviewer judges the result, bounded rework follows, and a **draft PR** waits for the owner at Gate B. **ForgeFlow never merges or deploys.** Nothing has been released. See [getting started](docs/getting-started.md).
 
 ## Why ForgeFlow?
 
@@ -48,7 +48,7 @@ Idea -> Discover -> Design -> HUMAN APPROVES PLAN
 
 ## Interfaces
 
-The user-facing name is **ForgeFlow**. Its short entry points are `/forge` for Claude Code and `$forge` for Codex, provided as repository-scoped skills. Both were exercised in the real clients during Checkpoints A and B. The underlying CLI is `forgeflow` (run it as `py -3.13 -m forgeflow` on Windows; Python 3.13+ required, see [getting started](docs/getting-started.md)); it is not named `forge` because that name collides with other common tools.
+The user-facing name is **ForgeFlow**. Its short entry points are `/forge` for Claude Code and `$forge` for Codex, provided as repository-scoped skills. Both were exercised in the real clients during Checkpoints A and B, and both CLIs build and review in Checkpoint C. The underlying CLI is `forgeflow` (run it as `py -3.13 -m forgeflow` on Windows; Python 3.13+ required, see [getting started](docs/getting-started.md)); it is not named `forge` because that name collides with other common tools.
 
 | Operation | Status |
 | --- | --- |
@@ -59,7 +59,8 @@ The user-facing name is **ForgeFlow**. Its short entry points are `/forge` for C
 | `design`: one versioned engineering plan per job | implemented |
 | `approve`: Gate A, by a human at an interactive console | implemented |
 | `handoff`: approved plan to a GitHub issue + Project item | implemented (idempotent) |
-| `run`, `review`, `rework`, `resume` with real providers | planned, Checkpoint C |
+| `run`: build (Claude Code or Codex), checks, review, bounded rework, draft PR | implemented (Gate B: you merge) |
+| `resume`, `rework`, `sync` | implemented |
 | knowledge sources (Markdown, optional Obsidian MCP) | planned, Checkpoint D |
 | `learn` | after v0.1 |
 
@@ -72,7 +73,8 @@ Packaging the skills for use in other repositories has not been validated yet.
 - [ADR 0002 — Optional knowledge sources and Obsidian](docs/decisions/0002-knowledge-sources-obsidian.md)
 - [ADR 0003 — Runtime, local job state, locking and worktrees](docs/decisions/0003-runtime-state-and-worktrees.md)
 - [ADR 0004 — Discovery, design, Gate A and GitHub handoff](docs/decisions/0004-planning-workflow-and-gate-a.md)
-- [Getting started (Checkpoints A and B, Windows)](docs/getting-started.md)
+- [ADR 0005 — Build, checks, review, bounded rework and delivery](docs/decisions/0005-build-review-and-delivery.md)
+- [Getting started (Checkpoints A to C, Windows)](docs/getting-started.md)
 - [MVP v0.1 scope and acceptance criteria](docs/mvp-scope.md)
 - [Development roadmap](docs/roadmap.md)
 - [Changelog and release history](CHANGELOG.md)
@@ -92,7 +94,7 @@ See [ATTRIBUTION.md](ATTRIBUTION.md) for source-level licensing distinctions and
 
 ## Contributing
 
-This project is pre-alpha. Checkpoints A (execution harness) and B (discovery, design, Gate A and GitHub handoff) are implemented and tested; building, review, pull requests and knowledge access are not (see the [roadmap](docs/roadmap.md)). Technical discussions, architecture critiques, and well-scoped suggestions are welcome through GitHub Issues. Please do not assume any advertised workflow is operational until an implementation and tests are published.
+This project is pre-alpha. Checkpoints A (execution harness), B (discovery, design, Gate A and GitHub handoff) and C (build, checks, review, bounded rework and draft PR) are implemented and tested; knowledge access is not (see the [roadmap](docs/roadmap.md)). Technical discussions, architecture critiques, and well-scoped suggestions are welcome through GitHub Issues. Please do not assume any advertised workflow is operational until an implementation and tests are published.
 
 If contributing code, keep it original or clearly identify third-party sources and their license obligations. Never include secrets or proprietary material.
 
