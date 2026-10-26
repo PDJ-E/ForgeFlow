@@ -50,7 +50,8 @@ All the above documentation was introduced as the project's initial foundation i
   - One draft PR per job, opened after a non-forced push of the job branch, with scope, "Closes #N", changes, check table, review, rounds, limitations and traceability; reused and updated on retries and rework, turned back into a draft if it was marked ready, verified to carry the validated commit before Gate B. ForgeFlow never merges; `forgeflow sync` records a merge only when GitHub reports it for that commit.
   - The GitHub Project Status follows the job from one table (Ready, Building, QA, Review, Blocked, Done), synced after every transition and on `forgeflow sync`, idempotently; Done only after a merge GitHub confirms; issues are never closed by ForgeFlow.
   - `forgeflow resume` continues an interrupted job in the phase it was in without a duplicate provider, a rebuild of an approved commit or a second PR. On Windows a killed orchestrator takes its provider with it.
-  - `/forge` and `$forge` can run `run`, `resume`, `rework` and `sync` when the user asks; [ADR 0005](docs/decisions/0005-build-review-and-delivery.md); ForgeFlow's own checks in `.forge/forgeflow.toml`; 64 new tests, including cross-process interruption tests.
+  - Verified live with the real CLIs (ADR 0005): Claude Code builder and Codex reviewer end to end on this repository, from an owner-approved plan to draft [PR #8](https://github.com/PDJ-E/ForgeFlow/pull/8) with green CI, unmerged; Codex builder and Claude reviewer through the same provider classes on a disposable local repository.
+  - `/forge` and `$forge` can run `run`, `resume`, `rework` and `sync` when the user asks; [ADR 0005](docs/decisions/0005-build-review-and-delivery.md); ForgeFlow's own checks in `.forge/forgeflow.toml`; 68 new tests, including cross-process interruption tests.
 
 **No dashboard or knowledge adapter has been implemented yet.**
 

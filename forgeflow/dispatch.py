@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import secrets
 import shutil
 import stat
 import tarfile
@@ -228,7 +229,6 @@ def run_reviewer(
     task: ProviderTask,
     *,
     checks_summary: str,
-    snapshot_factory: Callable[[Path, str], Path] | None = None,
 ) -> tuple[ProviderResult, Evidence]:
     """Review the validated commit in a disposable snapshot and record the review evidence.
 
@@ -255,7 +255,8 @@ def run_reviewer(
     shown = diff[:MAX_REVIEW_DIFF] + (
         "\n... diff truncated; read the files in the snapshot ..." if truncated else ""
     )
-    snapshot = (snapshot_factory or make_snapshot)(worktree, head)
+    remove_stale_snapshots(job.job_id)  # left behind by a review whose process was killed
+    snapshot = make_snapshot(worktree, head, job.job_id)
     try:
         review_task = replace(
             task,
@@ -286,9 +287,34 @@ def run_reviewer(
     return result, evidence
 
 
-def make_snapshot(worktree: Path, commit: str) -> Path:
-    """A fresh directory holding exactly the files of ``commit`` (no .git, no worktree link)."""
-    target = Path(tempfile.mkdtemp(prefix="forgeflow-review-"))
+_SNAPSHOT_PREFIX = "forgeflow-review-"
+
+
+def remove_stale_snapshots(job_id: str) -> None:
+    """Remove snapshots of ``job_id`` only (its id is in their names); a review holds the lease,
+    so none of them can be in use."""
+    for leftover in Path(tempfile.gettempdir()).glob(f"{_SNAPSHOT_PREFIX}{job_id}-*"):
+        if leftover.is_dir():
+            _remove_tree(leftover)
+
+
+def make_snapshot(worktree: Path, commit: str, job_id: str = "") -> Path:
+    """A fresh directory holding exactly the files of ``commit`` (no .git, no worktree link).
+
+    Created with a plain ``mkdir``, not ``tempfile.mkdtemp``: mkdtemp's mode 0o700 becomes an
+    owner-only ACL on Windows (Python 3.13+), which Codex's restricted sandbox identity cannot
+    read ("Access is denied"; seen in the Checkpoint C live run).
+    """
+    label = f"{job_id}-" if job_id else ""
+    for _ in range(5):
+        target = Path(tempfile.gettempdir()) / f"{_SNAPSHOT_PREFIX}{label}{secrets.token_hex(6)}"
+        try:
+            target.mkdir()
+            break
+        except FileExistsError:
+            continue
+    else:  # pragma: no cover - 2**48 names
+        raise ProviderError("could not create a review snapshot directory")
     archive = target.with_name(target.name + ".tar")
     try:
         git_ok(worktree, "archive", "--format=tar", "-o", str(archive), commit, read_only=True)

@@ -10,6 +10,8 @@ in test_delivery with real commits and checks.
 
 from __future__ import annotations
 
+import subprocess
+import sys
 import unittest
 from unittest import mock
 
@@ -236,6 +238,40 @@ class HelperTests(PipelineTestCase):
         plan = "# T\n\n## Acceptance criteria\n\n- [ ] one\n- [x] two\n- [ ] one\n"
         self.assertEqual(acceptance_criteria(plan, "fallback"), ("one", "two"))
         self.assertEqual(acceptance_criteria("# T\n", "fallback"), ("fallback",))
+
+    def test_the_review_snapshot_is_exactly_the_commit(self) -> None:
+        from forgeflow.dispatch import make_snapshot
+        from tests.support import rmtree
+
+        snapshot = make_snapshot(self.repo, "HEAD")
+        self.addCleanup(rmtree, snapshot)
+        files = sorted(
+            p.relative_to(snapshot).as_posix() for p in snapshot.rglob("*") if p.is_file()
+        )
+        self.assertEqual(files, [".forge/forgeflow.toml", "README.md", "docs/plan.md", "greet.txt"])
+
+    def test_only_the_jobs_own_stale_snapshots_are_removed(self) -> None:
+        from forgeflow.dispatch import make_snapshot, remove_stale_snapshots
+        from tests.support import rmtree
+
+        mine = make_snapshot(self.repo, "HEAD", "ff-20261026-aaaaaa")
+        other = make_snapshot(self.repo, "HEAD", "ff-20261026-bbbbbb")
+        self.addCleanup(rmtree, other)
+        remove_stale_snapshots("ff-20261026-aaaaaa")
+        self.assertFalse(mine.exists())
+        self.assertTrue(other.exists())
+
+    @unittest.skipUnless(sys.platform == "win32", "Windows ACL inheritance")
+    def test_the_review_snapshot_keeps_inherited_permissions(self) -> None:
+        """Regression (live run 2026-10-26): a mkdtemp directory has an owner-only ACL on
+        Windows, so Codex's sandbox identity got "Access is denied" reading the snapshot."""
+        from forgeflow.dispatch import make_snapshot
+        from tests.support import rmtree
+
+        snapshot = make_snapshot(self.repo, "HEAD")
+        self.addCleanup(rmtree, snapshot)
+        acl = subprocess.run(["icacls", str(snapshot)], capture_output=True, text=True).stdout
+        self.assertIn("(I)", acl, acl)
 
     def test_feedback_is_rebuilt_from_the_record(self) -> None:
         job = self.handed_off_job()

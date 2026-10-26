@@ -748,8 +748,8 @@ def _sync(start: Path, args: argparse.Namespace) -> int:
                 )
             else:
                 print(f"  PR #{pr.number} is open; it waits for the owner's merge (Gate B).")
-        elif listener is not None:
-            listener(job)
+        if listener is not None:
+            listener(store.load(job.job_id))  # idempotent: converges whatever happened above
     finally:
         if listener is not None:
             store.listeners.remove(listener)

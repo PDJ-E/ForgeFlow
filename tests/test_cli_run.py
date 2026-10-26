@@ -74,5 +74,23 @@ class CliRunTests(PipelineTestCase):
         for expected in ("latest checks", "passed", "real", "latest review", "mocked", "Blocked"):
             self.assertIn(expected, out)
 
+    def test_sync_realigns_the_project_status(self) -> None:
+        from forgeflow import fsutil
+        from forgeflow.config import config_path
+
+        fsutil.atomic_write_json(
+            config_path(self.repo), {"schema_version": 1, "github_project": self.binding.to_dict()}
+        )
+        job = self.handed_off_job()
+        self.tamper(job.job_id, lambda d: d.update(state="needs_human"))
+        with mock.patch("forgeflow.cli.GitHubClient", return_value=self.client):
+            code, out, _ = self.cli("sync", job.job_id)
+        self.assertEqual(code, cli.EXIT_NEEDS_HUMAN)
+        self.assertIn("Project Status Ready -> Blocked", out)
+        self.assertEqual(self.board_status(self.store.load(job.job_id)), "Blocked")
+        with mock.patch("forgeflow.cli.GitHubClient", return_value=self.client):
+            _, out, _ = self.cli("sync", job.job_id)
+        self.assertIn("Project Status already Blocked", out)
+
     def test_only_learn_is_still_unimplemented(self) -> None:
         self.assertEqual(set(cli.NOT_YET), {"learn"})

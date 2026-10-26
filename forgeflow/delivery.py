@@ -271,7 +271,7 @@ def pr_body(store: JobStore, job: Job, head: str) -> str:
         _private(str(build.get("summary") or "(the builder gave no summary)"), job).strip(),
         "",
         "```",
-        _private(str(commit.get("diffstat") or ""), job).strip() or "(no diffstat)",
+        _private(str(commit.get("diffstat") or ""), job).strip("\n") or "(no diffstat)",
         "```",
         "",
         f"## Validation (commit `{head}`)",

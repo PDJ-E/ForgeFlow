@@ -104,7 +104,7 @@ The job schema is version 3: `github.delivery` (marker, branch, pushed commit, P
 
 ## Verification
 
-Automated (unittest, 315 tests, all in disposable local repositories; GitHub mocked by a stateful fake that reads PR heads from a real local bare repository):
+Automated (unittest, 319 tests, all in disposable local repositories; GitHub mocked by a stateful fake that reads PR heads from a real local bare repository):
 
 - `test_pipeline`: every phase, rework after failed checks and after review findings, the limit, a human continuing with a reason, scope violations kept uncommitted, an unavailable reviewer blocking before dispatch, a failing reviewer never counting as approval, a reviewer unable to touch the build, the Codex sandbox refusal, Gate A and the handoff first, explicit providers, missing checks, and that a simulated build is never pushed.
 - `test_delivery`: real commits, real checks and real pushes; one draft PR, idempotent after a crash right after creating it, no force push over a diverged branch, no second PR for a closed one, rework redelivered to the same PR as a draft, merge recorded only when GitHub reports it, the board at Review then Done.
@@ -115,7 +115,19 @@ Live, with real providers: see [the live demonstration](#live-demonstration-2026
 
 ### Live demonstration (2026-10-26)
 
-To be completed with the results of the authorised run.
+Authorised by the owner for PDJ-E/ForgeFlow and Project ForgeFlow Development, with a small real fix: job **J2** (`ff-20261026-4cc2ad`), "Doctor header shows the version instead of a checkpoint".
+
+- **Gate A:** the owner ran `forgeflow approve J2` in their own terminal (method `interactive-console`, plan v1, sha256 `f411ca2e…`). The handoff created [issue #7](https://github.com/PDJ-E/ForgeFlow/issues/7) on the Project in Ready.
+- **Run:** `forgeflow run J2 --builder claude --reviewer codex`, from this branch's code, against base `ec696d4` (`origin/main`). The checks came from `.forge/forgeflow.toml` at the main checkout's HEAD (`daf9bbf`), because the base had none yet; the evidence records that.
+- **Build (real Claude Code 2.1.311):** about 22 s; changed `forgeflow/cli.py` and `tests/test_environment_cli.py` only; it said it ran no checks because it has no shell, as designed. ForgeFlow committed `64c5374` on `forge/ff-20261026-4cc2ad`. Usage: 60,245 input / 2,109 output tokens, API-equivalent estimate USD 0.13.
+- **Checks (real, run by ForgeFlow on `64c5374`):** unit tests exit 0 (75 s), `ruff check` 0, `ruff format --check` 0, `mypy` 0.
+- **Review (real Codex CLI 0.164.0, read-only):** approve, no findings, one round. **Finding:** Codex could not read the snapshot ("access restrictions"); it judged the diff and check results in its prompt only. Cause: `tempfile.mkdtemp` gives the directory an owner-only ACL on Windows (Python 3.13), which Codex's sandbox identity (`CodexSandboxUsers`) cannot read. Fixed after the run (plain `mkdir`, inherited ACL; regression test `test_the_review_snapshot_keeps_inherited_permissions`) and re-verified with a real Codex read-only run that read files from a snapshot.
+- **Delivery:** pushed `64c5374` (not forced), opened **draft** [PR #8](https://github.com/PDJ-E/ForgeFlow/pull/8) to `main`; GitHub reported that exact head; the job entered `awaiting_merge_approval`. The Project item went Ready → Building → QA → Review; issue #7 stayed open. All seven CI jobs passed on the PR. Nothing was merged; Gate B is the owner's.
+- Verified on GitHub afterwards with `gh`, not from ForgeFlow's output: PR draft, open, head `64c5374…`, base `main`; issue open; Status Review.
+
+**Reverse combination, locally (real CLIs, no GitHub):** ForgeFlow's `CodexProvider` built in a linked worktree of a disposable repository outside `%TEMP%` (it fixed a seeded bug and added a unittest; PID recorded and cleared; results `mocked: false`), the configured unittest check passed, and `ClaudeCodeProvider` reviewed a snapshot read-only and approved. The build worktree was unchanged afterwards. This exercised both provider classes in the other roles, but not the whole pipeline with GitHub.
+
+Not exercised live: rework rounds and escalation with real providers (covered by tests with simulated providers), `rework`, and `sync` after a real merge (Gate B is pending).
 
 ## Consequences
 
