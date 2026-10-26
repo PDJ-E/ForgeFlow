@@ -14,8 +14,18 @@ from pathlib import Path
 from typing import Any
 from unittest import mock
 
+from forgeflow.approval import approve_plan
 from forgeflow.gitrepo import discover_identity
-from forgeflow.jobs import Approval, Job, JobState, Policy, PullRequestLink, Repo, utc_now
+from forgeflow.jobs import (
+    HUMAN_APPROVAL_METHOD,
+    Approval,
+    Job,
+    JobState,
+    Policy,
+    PullRequestLink,
+    Repo,
+    utc_now,
+)
 from forgeflow.proc import DEFAULT_TIMEOUT, CommandResult
 from forgeflow.store import JobStore
 
@@ -99,7 +109,8 @@ class GitRepoTestCase(unittest.TestCase):
     ) -> Job:
         return self.store.create(title, self.repo_record(), Policy(builder, reviewer))
 
-    def approval_for(self, job: Job, method: str = "test-fixture") -> Approval:
+    def approval_for(self, job: Job, method: str = HUMAN_APPROVAL_METHOD) -> Approval:
+        """An approval record as a hostile or buggy caller could build it by hand."""
         assert job.plan.sha256 is not None
         return Approval(
             gate="plan",
@@ -107,14 +118,19 @@ class GitRepoTestCase(unittest.TestCase):
             approved_at=utc_now(),
             subject_sha256=job.plan.sha256,
             method=method,
+            subject_version=job.plan.version,
         )
+
+    def approve(self, job_id: str, console: ScriptedConsole | None = None) -> Job:
+        """Gate A through the real ceremony; only the console is simulated (a test double)."""
+        console = console or ScriptedConsole()
+        with mock.patch("forgeflow.approval.open_human_console", return_value=console):
+            return approve_plan(self.store, job_id)
 
     def approved_job(self, **kwargs: str | None) -> Job:
         job = self.new_job(**kwargs)  # type: ignore[arg-type]
         job = self.store.submit_plan(job.job_id, "docs/plan.md")
-        return self.store.transition(
-            job.job_id, JobState.PLAN_APPROVED, approval=self.approval_for(job)
-        )
+        return self.approve(job.job_id)
 
     def ready_job(self, issue_number: int = 7, **kwargs: str | None) -> Job:
         from forgeflow.github import GitHubClient, link_issue
@@ -143,6 +159,43 @@ class GitRepoTestCase(unittest.TestCase):
         data = json.loads(path.read_text("utf-8"))
         edit(data)
         path.write_text(json.dumps(data), encoding="utf-8")
+
+
+class ScriptedConsole:
+    """Test double for the human at the console: answers ``answer`` (default "y")."""
+
+    kind = "test-console"
+
+    def __init__(
+        self,
+        answer: str = "y",
+        *,
+        before_answer: Callable[[], None] | None = None,
+        type_ahead: str | None = None,
+    ) -> None:
+        self.answer = answer
+        self.before_answer = before_answer
+        # Keys pressed before the question appeared; discard_pending_input() drops them.
+        self.pending = type_ahead
+        self.shown = ""
+        self.prompts: list[str] = []
+        self.calls: list[str] = []
+
+    def write(self, text: str) -> None:
+        self.shown += text
+
+    def discard_pending_input(self) -> None:
+        self.calls.append("discard")
+        self.pending = None
+
+    def read_line(self, prompt: str) -> str:
+        self.calls.append("read")
+        self.prompts.append(prompt)
+        if self.before_answer is not None:
+            self.before_answer()  # e.g. someone edits the plan while the human reads it
+        if self.pending is not None:  # type-ahead would answer if it had not been discarded
+            return self.pending
+        return self.answer
 
 
 def pull_request(

@@ -29,14 +29,14 @@ The first complete implementation target is **[MVP v0.1](mvp-scope.md)**. Work s
 - [x] Verify Claude Code, Codex CLI, Git, GitHub CLI, Windows and available skills without installing dependencies silently (`forgeflow doctor`; MCP detection deferred to Checkpoint D)
 - [x] Confirm real `/forge` / `$forge` invocation mechanics: repository-scoped skills verified in Claude Code 2.1.310 and Codex 0.164.0; installation into other repositories still open
 - [x] Implement minimal durable job state, one-job locking, isolated worktree and non-destructive resume ([ADR 0003](decisions/0003-runtime-state-and-worktrees.md))
-- [ ] Configure/link a GitHub Project and define ID traceability. Done: job ↔ issue ↔ Project item ↔ branch ↔ PR contract. The Project is now discoverable (`read:project` granted; `doctor` sees #2 ForgeFlow Development, 2026-10-25). Previously blocked because the token lacked `read:project`
+- [x] Configure/link a GitHub Project and define ID traceability: job ↔ plan version/hash ↔ issue ↔ Project item ↔ branch ↔ PR. Project #2 ForgeFlow Development is bound with `forgeflow init --project 2` (Checkpoint B)
 
 ### Checkpoint B — Discovery and plan approval
 
-- [ ] Interactive idea exploration, product scope and architecture documentation
-- [ ] Reuse available Anthropic Product Management and Engineering skills where proven accessible
-- [ ] Gate A: human plan approval before issue dispatch or writing code
-- [ ] Convert approved plan into verifiable GitHub Issue/Project item
+- [x] Interactive idea exploration (`/forge idea`), durable outcomes, one versioned plan per job (`/forge design`) ([ADR 0004](decisions/0004-planning-workflow-and-gate-a.md))
+- [x] Reuse available Anthropic Product Management and Engineering skills where proven accessible (loaded as plugin skills in Claude Code and as `$pm-*` / `$eng-*` user skills in Codex; fallback guidance only when none is installed)
+- [x] Gate A: human plan approval at an interactive console before any issue or code; agent tool calls are refused
+- [x] Convert the approved plan into one traceable, idempotent GitHub Issue + Project item in Status Ready
 
 ### Checkpoint C — Build, QA, independent review and PR
 
@@ -45,6 +45,14 @@ The first complete implementation target is **[MVP v0.1](mvp-scope.md)**. Work s
 - [ ] Limit repair rounds, keep evidence and escalate unresolved risks
 - [ ] Produce a draft PR; Gate B requires owner approval for merge
 - [ ] Prove interrupted-job recovery without duplicate workers or lost changes
+- [ ] ForgeFlow owns Project Status transitions, driven only by verified job events:
+  - **Ready → Building → QA → Review → Done**, with **Blocked** for exceptions. The Project's own status-changing workflows are disabled by the owner (2026-10-25), so there is one source of these transitions and no competing automation.
+  - **Building:** when a builder is dispatched (job enters `building`). Starting work never closes the issue.
+  - **QA:** deterministic checks are running or recorded for the current build round (`verifying`).
+  - **Review:** review and Gate B, i.e. a draft PR whose head is the validated commit (`reviewing`, `awaiting_merge_approval`).
+  - **Done:** only after `record_merge` observes on GitHub the merge of that PR with the validated head commit, never on an agent's or reviewer's claim.
+  - **Blocked:** `needs_human`, exhausted rework or an unresolved risk. The item returns to its previous status when the job resumes.
+  - One mapping from job state to Status lives in the store's transition side effects, not in adapters or separate rules. Each write is idempotent and re-reads the item, as the Checkpoint B handoff does. GitHub Projects stays the authoritative board for approved work; ForgeFlow keeps no competing local board.
 
 ### Checkpoint D — Optional Knowledge Management
 

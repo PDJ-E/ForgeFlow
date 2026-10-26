@@ -25,7 +25,7 @@ from pathlib import Path
 from types import TracebackType
 from typing import Any
 
-from forgeflow.errors import LockTimeoutError, ValidationError
+from forgeflow.errors import ForgeFlowError, LockTimeoutError, PathTooLongError, ValidationError
 
 _REPLACE_ATTEMPTS = 12
 
@@ -37,8 +37,11 @@ def atomic_write_text(path: Path, text: str) -> None:
 
 def atomic_write_bytes(path: Path, data: bytes) -> None:
     """Replace ``path`` with ``data`` so readers see either the old or the new content."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    except OSError as exc:  # nothing has been written or replaced yet
+        raise _explain_long_path(path, _TEMP_NAME_EXTRA + len(path.name), exc) from exc
     try:
         with os.fdopen(fd, "wb") as fh:
             fh.write(data)
@@ -54,6 +57,31 @@ def atomic_write_bytes(path: Path, data: bytes) -> None:
 
 def atomic_write_json(path: Path, data: Any) -> None:
     atomic_write_text(path, json.dumps(data, indent=2, sort_keys=True, ensure_ascii=False) + "\n")
+
+
+# Windows without long-path support: a full path may have at most 259 characters (MAX_PATH
+# minus the terminator), and a directory 247 (room for an 8.3 file name).
+WINDOWS_MAX_PATH = 259
+# mkstemp names the temporary file ".<name>.<8 random characters>.tmp".
+_TEMP_NAME_EXTRA = len("..") + 8 + len(".tmp")
+
+
+def _explain_long_path(path: Path, name_length: int, exc: OSError) -> OSError | ForgeFlowError:
+    """Turn the confusing error Windows gives for an over-long path into a clear one.
+
+    Only paths that are actually too long are reported this way; other errors pass through.
+    """
+    if sys.platform != "win32":
+        return exc
+    directory = os.path.abspath(path.parent)
+    longest = len(directory) + 1 + name_length
+    if longest <= WINDOWS_MAX_PATH and len(directory) <= WINDOWS_MAX_PATH - 12:
+        return exc
+    return PathTooLongError(
+        f"cannot write {path}: the path needs {longest} characters and Windows allows "
+        f"{WINDOWS_MAX_PATH} unless long paths are enabled. Nothing was written. Enable long "
+        "paths (LongPathsEnabled) or move the repository to a shorter location."
+    )
 
 
 def read_json(path: Path) -> Any:
@@ -90,9 +118,13 @@ def append_jsonl(path: Path, record: dict[str, Any]) -> None:
     If a previous writer crashed mid-line, a newline is written first so the torn line stays
     isolated and every later record remains parseable.
     """
-    path.parent.mkdir(parents=True, exist_ok=True)
     line = json.dumps(record, sort_keys=True, ensure_ascii=False) + "\n"
-    with open(path, "a+b") as fh:
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fh = open(path, "a+b")  # noqa: SIM115 - closed by the with block below
+    except OSError as exc:
+        raise _explain_long_path(path, len(path.name), exc) from exc
+    with fh:
         fh.seek(0, os.SEEK_END)
         if fh.tell() > 0:
             fh.seek(-1, os.SEEK_END)

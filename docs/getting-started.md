@@ -1,6 +1,6 @@
-# Getting started — Checkpoint A (Windows first)
+# Getting started — Checkpoints A and B (Windows first)
 
-> **Status:** pre-alpha. Checkpoint A is a tested **execution harness**: environment inspection, durable job state, worktree isolation, provider detection, GitHub issue linkage and read-only status. It does **not** run Claude or Codex on your code, create issues or PRs, or merge anything. See [what is not implemented](#not-implemented-yet).
+> **Status:** pre-alpha. Checkpoint A is a tested **execution harness**: environment inspection, durable job state, worktree isolation, provider detection, GitHub issue linkage and read-only status. Checkpoint B adds the **planning workflow**: interactive discovery, one engineering plan per job, human plan approval (Gate A) and publishing the approved plan as a GitHub issue on your Project. ForgeFlow still does **not** run Claude or Codex on your code, create branches or PRs, or merge anything. See [what is not implemented](#not-implemented-yet).
 
 ## Requirements
 
@@ -9,7 +9,7 @@
 | Python 3.13+ | yes | CI tests 3.13 and 3.15. No third-party runtime packages. |
 | Git 2.31+ | yes | For `git rev-parse --path-format` and worktrees. |
 | GitHub CLI (`gh`) | for GitHub linkage | Authenticated. Project discovery also needs the `read:project` scope. |
-| Claude Code / Codex CLI | optional | Detected and reported only; neither is executed in Checkpoint A. |
+| Claude Code / Codex CLI | optional | Hosts for `/forge` and `$forge`. ForgeFlow never runs them as builders yet. |
 
 ForgeFlow never installs, upgrades or configures any of these.
 
@@ -53,10 +53,10 @@ The console script is `forgeflow` because `forge` collides with other widely ins
 
 | Host | File | Invocation |
 | --- | --- | --- |
-| Claude Code | `.claude/skills/forge/SKILL.md` | `/forge status`, `/forge doctor` |
-| Codex CLI | `.agents/skills/forge/SKILL.md` | `$forge status`, `$forge doctor` |
+| Claude Code | `.claude/skills/forge/SKILL.md` | `/forge idea <text>`, `/forge design <job>`, `/forge status`, ... |
+| Codex CLI | `.agents/skills/forge/SKILL.md` | `$forge idea <text>`, `$forge design <job>`, `$forge status`, ... |
 
-Both adapters are **repository-scoped**: they are discovered when the client runs inside this repository. They only call `python -m forgeflow doctor|status`, and rerun the same command once with `py -3.13` (Windows) or `python3.13` if `python` turns out to be older than 3.13. They report every other operation as not implemented, and they never emulate one by hand. The Claude adapter sets `disable-model-invocation: true`, so it runs only when you type `/forge`. Installing the skills for other repositories (user-level or packaged) is a later checkpoint, and no existing user-level skills are touched.
+Both adapters are **repository-scoped**: they are discovered when the client runs inside this repository. They hold the conversation and call the same `python -m forgeflow ...` commands (a test keeps their command tables identical), rerunning once with `py -3.13` (Windows) or `python3.13` if `python` is older than 3.13. Neither ever runs `approve`. They report `run`, `review`, `rework`, `resume` and `learn` as not implemented and never emulate them by hand. The Claude adapter sets `disable-model-invocation: true`, so it runs only when you type `/forge`. Installing the skills for other repositories (user-level or packaged) is a later checkpoint, and no existing user-level skills are touched.
 
 ### Verified invocation
 
@@ -70,6 +70,64 @@ Pitfalls found while verifying, which Checkpoint C's provider runner must handle
 - **Git Bash rewrites `/` arguments.** Git for Windows (MSYS) converts arguments that start with `/`. Running `claude -p "/forge status"` from Git Bash delivers `C:/Program Files/Git/forge status` to Claude. Set `MSYS_NO_PATHCONV=1` for that command, or use PowerShell. Typing `/forge` inside an interactive Claude Code session is unaffected.
 - **`codex exec` waits on an open stdin.** When stdin is a pipe rather than a terminal, Codex prints `Reading additional input from stdin...` and blocks. Close stdin (`< NUL` in cmd, `< /dev/null` in Git Bash). ForgeFlow's runner always uses an explicit stdin.
 - In single-quoted shells, write `'$forge'` so the shell does not expand `$forge` as a variable.
+
+## Plan an idea (Checkpoint B)
+
+The flow is **idea → discovery → design → your approval → GitHub issue on the Project**. Nothing in it writes code or starts a builder. Design rationale and the threat model: [ADR 0004](decisions/0004-planning-workflow-and-gate-a.md).
+
+Jobs have a short reference, `J1`, `J2`, …, shown by every command and accepted anywhere a job is expected (as is the full id `ff-YYYYMMDD-xxxxxx`). References are unique within this clone and never reused; the full id stays the identifier for branches, logs and GitHub. Jobs created before references existed get one the next time a command changes them; `status` itself never writes.
+
+### 1. Bind the GitHub Project (once per clone)
+
+```powershell
+py -3.13 -m forgeflow init                # checks the setup and lists Projects; writes nothing
+py -3.13 -m forgeflow init --project 2    # binds Project #2; approved work goes to Status "Ready"
+```
+
+`init --project` reads the Project and checks that its **Status** field has the option ForgeFlow will use (`--ready-status NAME` picks another). It records the binding in `.forge/runtime/config.json` (local, never committed) and changes nothing on GitHub. Writing to the Project needs the `project` token scope: `gh auth refresh -s project`.
+
+### 2. Discuss the idea
+
+In Claude Code type `/forge idea <your idea>`; in Codex, `$forge idea <your idea>`. The agent asks a few proportional questions, compares approaches and records only the **outcomes** with `forgeflow idea add/mark`: requirements, decisions, rejected options and why, open questions. Resume any time with `/forge idea resume <job>` (it reads `forgeflow idea show <job>`). If Anthropic's Product Management skills are available in the host (`forgeflow skills --host claude-code|codex`), the agent uses them; otherwise it uses short built-in guidance.
+
+The same steps work without an agent:
+
+```powershell
+py -3.13 -m forgeflow idea new "Add --version" --idea "I can't tell which build I'm running"
+py -3.13 -m forgeflow idea add <job> decision "Read the installed version" --status accepted
+py -3.13 -m forgeflow idea add <job> alternative "Hardcode it" --status rejected --note "drifts"
+py -3.13 -m forgeflow idea show <job> --all
+```
+
+### 3. Design the plan
+
+`/forge design <job>` (or `forgeflow design new <job>`) creates **one** plan file, `.forge/runtime/jobs/<job>/plan.md`, prefilled from the discovery. Edit it with the agent, which uses the Engineering skills when available. `forgeflow design check <job>` lists what is missing. When you are content: `forgeflow design submit <job>` pins those exact bytes as plan version *n*. Changing your mind later: `forgeflow design revise <job> --reason "..."`, then submit again (a new version).
+
+The approved plan is published **verbatim** as the issue body. Keep private notes in the discovery, which never leaves your machine.
+
+### 4. Approve it yourself (Gate A)
+
+Open **your own** terminal (PowerShell or Windows Terminal) in the repository and run:
+
+```powershell
+py -3.13 -m forgeflow approve <job>
+```
+
+It prints the plan, its version and sha256, the target repository and its visibility, the Project and Status, and what approval does **not** allow, then asks `Approve plan v1 of J3 (sha256 …)? [y/N]`. Only `y` or `yes` approves; Enter (the default, No), anything else, Ctrl+C or end of input cancels and records nothing. Keys pressed while the plan was scrolling are discarded before the question, so they cannot answer it. It then publishes the issue and Project item (step 5). Add `--no-handoff` to only record the approval, or `--issue N` to link an existing issue instead of creating one.
+
+`approve` refuses (exit code 3, nothing recorded) unless both its input and output are an interactive console. So it cannot be run by Claude Code's Bash or PowerShell tools, by `codex exec`, through a pipe, or from Claude Code's `!` prefix. That is deliberate. A changed plan, or a resubmission while you read, is refused as well. The limits of this protection are in [ADR 0004](decisions/0004-planning-workflow-and-gate-a.md#gate-a-a-human-at-an-interactive-console).
+
+### 5. Hand off to GitHub
+
+`approve` runs the handoff for you. `py -3.13 -m forgeflow handoff <job>` re-runs it safely: it finds what an interrupted run already did (by a trace marker in the issue) and never duplicates the issue or the Project item. `--dry-run` shows what would be published. The result is one issue in your repository, on the bound Project, in the Ready status (a status you already set on the board is left alone). `forgeflow status <job>` shows the plan version, the approval, the issue and the Project item. The job stays `plan_approved` with no branch, worktree or builder until Checkpoint C.
+
+### Host notes
+
+- **Claude Code:** verified end to end on 2026-10-25 (see [ADR 0004](decisions/0004-planning-workflow-and-gate-a.md#verification-in-the-real-hosts-2026-10-25)). Approve in a separate terminal window, not with `!`.
+- **Codex skills:** Codex reads skills from `~/.agents/skills` (user) and `<repo>/.agents/skills`. Adapted copies of Anthropic's skills there (for example `pm-brainstorm`, `eng-system-design`) are recognised by the `source-package` / `source-skill` provenance in their `SKILL.md`; `forgeflow skills --host codex` lists them with the `$name` to invoke. Verified 2026-10-25: `$forge idea` loaded `$pm-brainstorm`.
+- **Codex on Windows:** with `[windows] sandbox = "elevated"` in `~/.codex/config.toml`, Codex runs commands as the local user `CodexSandboxOffline`, which cannot read a Python installed only for your user. `$forge` then cannot run ForgeFlow at all. Set `sandbox = "unelevated"` in your Codex configuration or start Codex with `-c 'windows.sandbox="unelevated"'` (both verified), or install Python 3.13 for all users to keep the elevated sandbox. ForgeFlow does not change your Codex configuration. `init` and `handoff` need network access, which Codex's sandbox may block; run them in your own terminal (approval already performs the handoff).
+- **Project automations:** GitHub Project workflows run after ForgeFlow and can change an item's Status. On ForgeFlow Development the "Item closed" workflow moved the closed test item to `Building`, so all built-in workflows there are now disabled. Disable status-changing workflows on any Project ForgeFlow manages; from Checkpoint C ForgeFlow sets Building, QA, Review, Done and Blocked itself. `forgeflow handoff` reports the Status it observes on each run.
+- **Windows path length:** without long-path support, Windows allows 259 characters per path. The longest name ForgeFlow writes in a job directory is about 72 characters below the repository root, so roots up to about **185 characters** work (tested). If a path does not fit, the command stops with `cannot write …: the path needs N characters …. Nothing was written.` Enable long paths (`LongPathsEnabled`) or move the repository to a shorter location.
 
 ## Running the tests
 
@@ -93,7 +151,12 @@ The suite creates throwaway git repositories under `%TEMP%` with an isolated git
 | `test_python_version` | `pyproject.toml`, CI matrix, and `py -3.10` if installed | — |
 | `test_github` | Remote parsing, store linkage | `gh` responses (fake runner) |
 | `test_providers` | Task and policy validation | CLI output (scripted runner) |
-| `test_environment_cli` | git, CLI output, read-only guarantees | `gh` responses, provider CLIs |
+| `test_environment_cli` | git, CLI output, read-only guarantees, adapter consistency | `gh` responses, provider CLIs |
+| `test_discovery`, `test_design` | Store, files, versions, hashes, interrupted writes | — |
+| `test_approval` | Gate A: ceremony, refusals, races, a **real non-interactive child process**, dispatch prevention | The human at the console (`ScriptedConsole`, patched in only by tests) |
+| `test_handoff` | Store, idempotency and recovery logic | **All GitHub calls** (`tests/fake_github.py`, a stateful fake `gh`) |
+| `test_refs` | Short references: allocation (also from parallel threads), no reuse, resolution, backfill, read-only `status` | — |
+| `test_hostskills` | Plugin and skill discovery | `claude plugin list` output, a temporary Codex home |
 
 Opt-in tests that make **real, read-only** calls:
 
@@ -101,7 +164,8 @@ Opt-in tests that make **real, read-only** calls:
 $env:FORGEFLOW_LIVE_GITHUB = "1"     # gh api graphql: a public issue (default cli/cli#2) and PR cli/cli#1
 $env:FORGEFLOW_LIVE_ISSUE = "owner/name#N"   # optional target override
 $env:FORGEFLOW_LIVE_PROVIDERS = "1"  # claude/codex --version, --help, auth status (no model call)
-py -3.13 -m unittest tests.test_github tests.test_providers -v
+py -3.13 -m unittest tests.test_github tests.test_handoff tests.test_providers -v
+# test_handoff's live part reads a Project: FORGEFLOW_LIVE_PROJECT=owner#N (default PDJ-E#2)
 ```
 
 ### Developer tools (optional)
@@ -121,7 +185,10 @@ ForgeFlow never installs or upgrades these itself. CI installs the same `lint` g
 ```text
 <repo>/.forge/runtime/jobs/<job-id>/job.json      snapshot (atomic, revisioned)
 <repo>/.forge/runtime/jobs/<job-id>/events.jsonl  audit trail
-<repo>/.forge/runtime/jobs/<job-id>/plans/        byte-exact snapshots of submitted plans
+<repo>/.forge/runtime/config.json                  bound GitHub Project (forgeflow init)
+<repo>/.forge/runtime/jobs/<job-id>/discovery.json outcomes of the idea discussion (never published)
+<repo>/.forge/runtime/jobs/<job-id>/plan.md        the job's plan, edited during design
+<repo>/.forge/runtime/jobs/<job-id>/plans/vN.md   byte-exact snapshot of plan version N (its sha256 is in job.json)
 <repo>/.forge/runtime/jobs/<job-id>/evidence/     machine-readable results
 <repo>/.forge/worktrees/<job-id>/                  isolated worktree on branch forge/<job-id>
 ```
@@ -138,8 +205,8 @@ gh auth refresh -s read:project
 
 Verified on 2026-10-25: the token's scopes include `read:project`, and `doctor` reports `Projects visible: #2 ForgeFlow Development`. (On 2026-10-24 the scope was missing and the lookup failed with GraphQL `INSUFFICIENT_SCOPES`. That is no longer a blocker.)
 
-ForgeFlow never creates or modifies Projects, fields, issues or labels in Checkpoint A.
+ForgeFlow never creates or modifies Projects, fields, options, labels or repository settings. Since Checkpoint B it creates exactly one issue per approved plan (or comments once on an issue you link), adds it to the bound Project and sets its Status, only after Gate A. That needs the `project` scope (`gh auth refresh -s project`).
 
 ## Not implemented yet
 
-`init`, `idea`, `design`, `approve` (Checkpoint B); `run`, `review`, `rework`, `resume` with real providers (Checkpoint C); knowledge sources and Obsidian (Checkpoint D); `learn` (after v0.1). These CLI subcommands exist only to say so: they exit with code 2 and change nothing.
+`run`, `review`, `rework`, `resume` with real providers, and builder assignment and worktree preparation for approved jobs (Checkpoint C); knowledge sources and Obsidian (Checkpoint D); `learn` (after v0.1). These CLI subcommands exist only to say so: they exit with code 2 and change nothing.

@@ -9,7 +9,8 @@ Layout (inside the main checkout, self-ignored by git)::
             job.json          current snapshot (atomic replace, revisioned)
             events.jsonl      append-only audit trail of changes and decisions
             lease.lock        OS lock held by the live worker process for the job
-            plans/<sha256>.md byte-exact snapshot of each submitted plan; builders get this text
+            plans/v<N>.md     byte-exact snapshot of plan version N (hash in job.json); builders
+                              get this text. Older jobs may have plans/<sha256>.md instead.
             evidence/         machine-readable results (checks, provider output, reviews)
 
 Concurrency model:
@@ -22,6 +23,10 @@ Concurrency model:
   the provider subprocess (PID plus start time). While that subprocess still runs, the lease
   record is never cleared, so no second builder can start next to it.
 * A job sitting in a worker state without a live lease is, by definition, interrupted.
+
+Gate A is reached only through ``forgeflow.approval.approve_plan``, which captures the decision
+from a human at an interactive console; ``transition()`` refuses PLAN_APPROVED outright, and every
+later boundary accepts only approvals captured that way (see ADR 0004).
 
 Delivery states are reached only through methods that verify, not through caller claims:
 ``request_merge_approval`` (Gate B) needs checks that ``run_checks`` itself ran on the current
@@ -54,10 +59,13 @@ from forgeflow.errors import (
 )
 from forgeflow.gitrepo import git_ok, porcelain_status
 from forgeflow.jobs import (
+    HUMAN_APPROVAL_METHOD,
+    JOB_ID_PATTERN,
     REWORK_SOURCES,
     SLOT_STATES,
     TERMINAL_STATES,
     TRANSITIONS,
+    UNASSIGNED_PROVIDER,
     WORKER_STATES,
     Approval,
     Evidence,
@@ -96,6 +104,8 @@ _LEASE_START_STATES = frozenset({S.READY, S.INTERRUPTED, S.AWAITING_MERGE_APPROV
 _LEASE_ENDING_STATES = TERMINAL_STATES | {S.NEEDS_HUMAN, S.AWAITING_MERGE_APPROVAL}
 # worker_status() answers that must keep the job owned.
 _WORKER_BLOCKING = frozenset({"running", "unverifiable"})
+# JSON documents beside job.json that edit_document() may replace.
+_SIDE_DOCUMENTS = frozenset({"discovery.json"})
 
 
 @dataclass(frozen=True)
@@ -154,7 +164,12 @@ class JobStore:
     def _events_file(self, job_id: str) -> Path:
         return self.job_dir(job_id) / "events.jsonl"
 
-    def _plan_snapshot(self, job_id: str, digest: str) -> Path:
+    def _plan_snapshot(self, job_id: str, version: int) -> Path:
+        # Short names keep deep repositories under Windows MAX_PATH; the hash lives in job.json.
+        return self.job_dir(job_id) / "plans" / f"v{version}.md"
+
+    def _legacy_plan_snapshot(self, job_id: str, digest: str) -> Path:
+        # Snapshots written before plan versions had files of their own were named by hash.
         return self.job_dir(job_id) / "plans" / f"{digest}.md"
 
     def _lease_lock(self, job_id: str) -> fsutil.FileLock:
@@ -228,6 +243,26 @@ class JobStore:
         except FileNotFoundError as exc:
             raise InvalidTransitionError(f"plan document {job.plan.path} is missing") from exc
 
+    def plan_snapshot_text(self, job_id: str, digest: str, version: int | None) -> str:
+        """A submitted plan's byte-exact snapshot, verified against its hash, as UTF-8 text.
+
+        The snapshot is ``plans/v<version>.md``. Only when that file does not exist (or the
+        version is unknown, as in records older than plan versions) is the earlier
+        ``plans/<sha256>.md`` name read. A ``v<version>.md`` that does not match its hash is
+        refused outright, never replaced by another file.
+        """
+        candidates = [self._plan_snapshot(job_id, version)] if version else []
+        candidates.append(self._legacy_plan_snapshot(job_id, digest))
+        for path in candidates:
+            try:
+                data = path.read_bytes()
+            except FileNotFoundError:
+                continue
+            if hashlib.sha256(data).hexdigest() != digest:
+                raise InvalidTransitionError(f"the plan snapshot {path.name} was modified")
+            return data.decode("utf-8")
+        raise InvalidTransitionError("the plan snapshot is missing; resubmit the plan for approval")
+
     def plan_digest(self, job: Job) -> str:
         """sha256 of the plan file in the main checkout as it is on disk right now."""
         return hashlib.sha256(self._read_plan(job)).hexdigest()
@@ -237,15 +272,9 @@ class JobStore:
         approval = job.plan.approval
         if approval is None or approval.gate != "plan":
             raise InvalidTransitionError("Gate A: the plan has not been approved")
-        try:
-            data = self._plan_snapshot(job.job_id, approval.subject_sha256).read_bytes()
-        except FileNotFoundError as exc:
-            raise InvalidTransitionError(
-                "the approved plan snapshot is missing; resubmit the plan for approval"
-            ) from exc
-        if hashlib.sha256(data).hexdigest() != approval.subject_sha256:
-            raise InvalidTransitionError("the approved plan snapshot was modified")
-        return data.decode("utf-8")
+        return self.plan_snapshot_text(
+            job.job_id, approval.subject_sha256, approval.subject_version
+        )
 
     # --- creation and generic mutation -----------------------------------------------------
 
@@ -259,6 +288,9 @@ class JobStore:
             )
         with self._state_lock():
             self._ensure_layout()
+            # Older jobs get their references first, so numbering follows creation order.
+            self._assign_missing_refs_locked()
+            ref = self._next_ref_locked()
             for _ in range(5):
                 job_id = new_job_id()
                 try:
@@ -271,6 +303,7 @@ class JobStore:
             now = utc_now()
             draft = Job(
                 job_id=job_id,
+                ref=ref,
                 title=title.strip(),
                 state=S.DRAFT,
                 repo=repo,
@@ -281,8 +314,75 @@ class JobStore:
             )
             job = Job.from_dict(draft.to_dict())  # validate (and redact) before the first write
             fsutil.atomic_write_json(self._job_file(job_id), job.to_dict())
-            self._append_event(job, "created", None, details={"title": job.title})
+            self._append_event(job, "created", None, details={"title": job.title, "ref": ref})
         return job
+
+    # --- short references (J1, J2, ...) --------------------------------------------------------
+
+    def _refs_file(self) -> Path:
+        return self.runtime_dir / "refs.json"
+
+    def _next_ref_locked(self) -> str:
+        """Allocate the next reference. The counter is saved before the reference is used, so a
+        crash can skip a number but never hand one out twice; deleted jobs keep theirs."""
+        path = self._refs_file()
+        try:
+            counter = int(fsutil.read_json(path)["next"])
+        except FileNotFoundError:
+            counter = 1
+        except (ValueError, KeyError, TypeError) as exc:
+            raise ValidationError(f"{path} is corrupt ({exc}); fix or remove it") from exc
+        jobs, _ = self.list_jobs()
+        used = max((int(j.ref[1:]) for j in jobs if j.ref), default=0)
+        number = max(counter, used + 1)  # never below a reference already on disk
+        fsutil.atomic_write_json(path, {"next": number + 1})
+        return f"J{number}"
+
+    def _assign_missing_refs_locked(self) -> list[Job]:
+        jobs, _ = self.list_jobs()
+        assigned = []
+        for job in sorted((j for j in jobs if j.ref is None), key=lambda j: j.created_at):
+            ref = self._next_ref_locked()
+
+            def apply(current: Job, ref: str = ref) -> None:
+                if current.ref is None:
+                    current.ref = ref
+
+            assigned.append(
+                self._mutate_locked(job.job_id, apply, "ref-assigned", {"ref": ref}, None)
+            )
+        return assigned
+
+    def assign_missing_refs(self) -> list[Job]:
+        """Give jobs created before short references existed their J<n>. Idempotent."""
+        if not self.jobs_dir.is_dir():
+            return []
+        with self._state_lock():
+            return self._assign_missing_refs_locked()
+
+    def resolve(self, token: str) -> str:
+        """The job id for a full id or a short reference (``J3``, case-insensitive). Read-only.
+
+        Unknown or ambiguous references are refused rather than guessed.
+        """
+        text = token.strip()
+        if JOB_ID_PATTERN.match(text):
+            return text
+        match = re.fullmatch(r"[Jj]([1-9]\d{0,8})", text)
+        if match is None:
+            raise ValidationError(
+                f"{token!r} is neither a job reference like J3 nor a job id like ff-YYYYMMDD-xxxxxx"
+            )
+        ref = f"J{match.group(1)}"
+        jobs, problems = self.list_jobs()
+        owners = [j.job_id for j in jobs if j.ref == ref]
+        if len(owners) > 1:
+            raise ValidationError(f"{ref} is ambiguous ({', '.join(owners)}); use the full id")
+        if not owners:
+            known = ", ".join(j.ref for j in jobs if j.ref) or "none"
+            hint = f"; {len(problems)} unreadable job record(s)" if problems else ""
+            raise ValidationError(f"no job {ref} in this repository (known: {known}){hint}")
+        return owners[0]
 
     def update(
         self,
@@ -361,6 +461,54 @@ class JobStore:
             record["details"] = details
         fsutil.append_jsonl(self._events_file(job.job_id), record)
 
+    def edit_document(
+        self,
+        job_id: str,
+        name: str,
+        edit: Callable[[Job, Any], Any],
+        *,
+        allowed_states: frozenset[JobState],
+        event: str,
+        details: dict[str, Any] | None = None,
+    ) -> Any:
+        """Replace one of a job's side documents (e.g. ``discovery.json``) under the state lock.
+
+        ``edit`` receives the job and the current document (``None`` if absent) and returns
+        the new one. The job's revision advances and the change is logged, so an approval shown
+        at an older revision can no longer be committed.
+        """
+        if name not in _SIDE_DOCUMENTS:
+            raise ValidationError(f"unknown job document {name!r}")
+        path = self.job_dir(job_id) / name
+        with self._state_lock():
+            job = self.load(job_id)
+            if job.state not in allowed_states:
+                allowed = ", ".join(sorted(s.value for s in allowed_states))
+                raise InvalidTransitionError(
+                    f"job {job_id} is {job.state.value}; {name} can change only in: {allowed}"
+                )
+            try:
+                current = fsutil.read_json(path)
+            except FileNotFoundError:
+                current = None
+            except ValueError as exc:
+                raise ValidationError(f"{path} is not valid JSON: {exc}") from exc
+            updated = edit(job, current)
+            fsutil.atomic_write_json(path, updated)
+            self._mutate_locked(job_id, lambda _: None, event, details, None)
+        return updated
+
+    def read_document(self, job_id: str, name: str) -> Any:
+        if name not in _SIDE_DOCUMENTS:
+            raise ValidationError(f"unknown job document {name!r}")
+        path = self.job_dir(job_id) / name
+        try:
+            return fsutil.read_json(path)
+        except FileNotFoundError:
+            return None
+        except ValueError as exc:
+            raise ValidationError(f"{path} is not valid JSON: {exc}") from exc
+
     def record_worktree(self, job_id: str, worktree: Worktree) -> Job:
         """Record the job's worktree: only its own location and branch, and only once."""
         expected = self.repo_root / WORKTREES_RELATIVE / job_id
@@ -392,19 +540,29 @@ class JobStore:
 
         def apply(job: Job) -> None:
             self._require_transition(job, S.AWAITING_PLAN_APPROVAL)
-            job.plan = Plan(path=rel.as_posix())
+            job.plan = Plan(
+                path=rel.as_posix(), version=job.plan.version + 1, submitted_at=utc_now()
+            )
             data = self._read_plan(job)
             try:
                 data.decode("utf-8")
             except UnicodeDecodeError as exc:
                 raise ValidationError(f"plan document {rel.as_posix()} is not UTF-8") from exc
             job.plan.sha256 = hashlib.sha256(data).hexdigest()
-            fsutil.atomic_write_bytes(self._plan_snapshot(job.job_id, job.plan.sha256), data)
+            # Versions only grow and job.json still records the previous one, so a v<N>.md that
+            # already exists was left by a submission that crashed before it was recorded;
+            # nothing refers to it. Recorded snapshots (older versions) are never written again.
+            fsutil.atomic_write_bytes(self._plan_snapshot(job.job_id, job.plan.version), data)
             job.state = S.AWAITING_PLAN_APPROVAL
 
-        return self._mutate(
-            job_id, apply, "plan-submitted", {"plan": rel.as_posix(), "reason": reason}, None
-        )
+        details: dict[str, Any] = {"plan": rel.as_posix(), "reason": reason}
+
+        def apply_and_describe(job: Job) -> None:
+            apply(job)
+            # The log names exactly which bytes each version was, so history survives revisions.
+            details.update(version=job.plan.version, sha256=job.plan.sha256)
+
+        return self._mutate(job_id, apply_and_describe, "plan-submitted", details, None)
 
     def transition(
         self,
@@ -419,6 +577,11 @@ class JobStore:
         """Move a job to ``target`` if the table and the target's guard allow it."""
         if target is S.INTERRUPTED:
             raise InvalidTransitionError("INTERRUPTED is entered only through recovery")
+        if target is S.PLAN_APPROVED:
+            raise InvalidTransitionError(
+                "Gate A: plan approval is captured only by `forgeflow approve`, run by a human "
+                "at an interactive console"
+            )
         if target is S.AWAITING_PLAN_APPROVAL:
             raise InvalidTransitionError("use submit_plan() to request plan approval")
         if target is S.AWAITING_MERGE_APPROVAL:
@@ -432,6 +595,18 @@ class JobStore:
             approval=approval,
             lease_token=lease_token,
             expected_revision=expected_revision,
+        )
+
+    def _record_plan_approval(
+        self, job_id: str, approval: Approval, *, expected_revision: int
+    ) -> Job:
+        """AWAITING_PLAN_APPROVAL -> PLAN_APPROVED. Called only by forgeflow.approval.
+
+        ``expected_revision`` is the revision the human was shown, so a resubmission or any
+        other change between display and confirmation is refused instead of being approved.
+        """
+        return self._transition(
+            job_id, S.PLAN_APPROVED, approval=approval, expected_revision=expected_revision
         )
 
     def request_merge_approval(
@@ -518,12 +693,34 @@ class JobStore:
         if target is S.PLAN_APPROVED:
             if approval is None or approval.gate != "plan":
                 raise InvalidTransitionError("Gate A: a recorded plan approval is required")
-            current = self.plan_digest(job)
-            if approval.subject_sha256 != job.plan.sha256 or current != job.plan.sha256:
+            if approval.method != HUMAN_APPROVAL_METHOD:
                 raise InvalidTransitionError(
-                    "Gate A: the approval does not match the submitted plan, or the plan "
-                    "changed after submission; resubmit it for approval"
+                    f"Gate A: approvals captured by {approval.method!r} are not accepted"
                 )
+            current = self.plan_digest(job)
+            if (
+                approval.subject_sha256 != job.plan.sha256
+                or current != job.plan.sha256
+                or approval.subject_version != job.plan.version
+            ):
+                raise InvalidTransitionError(
+                    "Gate A: the approval does not match the submitted plan version, or the "
+                    "plan changed after submission; resubmit it for approval"
+                )
+            # The snapshot must be intact too.
+            self.plan_snapshot_text(job.job_id, current, job.plan.version)
+
+        if target is S.DRAFT and source is S.PLAN_APPROVED:
+            # Revoking an approval is safe only while nothing was built or published from it.
+            if job.github.issue is not None or job.github.handoff is not None:
+                raise InvalidTransitionError(
+                    "the approved plan was already handed off to GitHub; it cannot be revised "
+                    "in place (cancel the job and close its issue instead)"
+                )
+            if job.worktree is not None:
+                raise InvalidTransitionError("the job already has a worktree")
+            if not reason.strip():
+                raise InvalidTransitionError("revoking a plan approval requires a reason")
 
         needs_reason = target in (S.CANCELLED, S.NEEDS_HUMAN) or source is S.NEEDS_HUMAN
         if needs_reason and not reason.strip():
@@ -664,7 +861,9 @@ class JobStore:
         if target is S.PLAN_APPROVED:
             job.plan.approval = approval
         if target is S.DRAFT:
-            job.plan = Plan()  # revising the plan invalidates the previous submission
+            # Revising the plan invalidates the previous submission and any approval of it; the
+            # version counter is kept so the next submission is a new, distinct version.
+            job.plan = Plan(version=job.plan.version)
         if target is S.BUILDING:
             job.attempts.build += 1
             if source in REWORK_SOURCES:
@@ -684,10 +883,26 @@ class JobStore:
             # Human-facing and terminal states own no worker; the recorded lease ends here.
             job.lease = None
 
+    def verify_plan_approval(self, job_id: str) -> Job:
+        """Gate A re-check for an execution boundary (handoff, dispatch). Returns the job.
+
+        Refuses unless the plan was approved by a human, the plan file still has the approved
+        hash and the approved snapshot is intact.
+        """
+        job = self.load(job_id)
+        self.require_own_repository(job)
+        self._require_current_plan_approval(job)
+        return job
+
     def _require_current_plan_approval(self, job: Job) -> None:
         approval = job.plan.approval
         if approval is None or approval.gate != "plan":
             raise InvalidTransitionError("Gate A: the plan has not been approved")
+        if approval.method != HUMAN_APPROVAL_METHOD:
+            raise InvalidTransitionError(
+                f"Gate A: the recorded approval was captured by {approval.method!r}, not by a "
+                "human at an interactive console"
+            )
         if self.plan_digest(job) != approval.subject_sha256:
             raise InvalidTransitionError(
                 "Gate A: the plan document changed after approval; it must be re-approved"
@@ -935,6 +1150,10 @@ class JobStore:
                 expected_provider = (
                     job.policy.reviewer if expected_role == "reviewer" else job.policy.builder
                 )
+                if expected_provider in (None, UNASSIGNED_PROVIDER):
+                    raise LeaseError(
+                        f"job {job_id} has no {expected_role} assigned yet; nothing can run it"
+                    )
                 if role != expected_role or provider != expected_provider:
                     raise LeaseError(
                         f"job {job_id} needs its {expected_role} {expected_provider!r}, "
@@ -1137,6 +1356,7 @@ def _protected_fields(job: Job) -> tuple[Any, ...]:
         job.lease.to_dict() if job.lease else None,
         job.attempts.to_dict(),
         job.job_id,
+        job.ref,
         job.policy.to_dict(),
         job.repo.to_dict(),
         job.worktree.to_dict() if job.worktree else None,

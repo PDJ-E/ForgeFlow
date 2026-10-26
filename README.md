@@ -2,7 +2,7 @@
 
 **A human-guided, multi-model AI software factory for Claude Code, Codex, and GitHub.**
 
-> **Status: pre-alpha, unreleased.** The code currently provides Checkpoint A, a tested execution harness. It covers environment inspection, durable job state, worktree isolation, provider detection, GitHub issue linkage and read-only `status`. **No autonomous pipeline exists yet:** ForgeFlow does not run Claude or Codex on code, create issues or PRs, or merge. Nothing has been released. See [getting started](docs/getting-started.md).
+> **Status: pre-alpha, unreleased.** The code provides Checkpoint A, a tested execution harness (environment inspection, durable job state, worktree isolation, provider detection, read-only `status`), and Checkpoint B, the planning workflow: interactive discovery, one engineering plan per job, human plan approval (Gate A) and publishing the approved plan as a GitHub issue on your Project. **No autonomous pipeline exists yet:** ForgeFlow does not run Claude or Codex on code, create branches or PRs, or merge. Nothing has been released. See [getting started](docs/getting-started.md).
 
 ## Why ForgeFlow?
 
@@ -48,13 +48,17 @@ Idea -> Discover -> Design -> HUMAN APPROVES PLAN
 
 ## Interfaces
 
-The user-facing name is **ForgeFlow**. Its short entry points are `/forge` for Claude Code and `$forge` for Codex, provided as repository-scoped skills. Both were invoked successfully in the real clients during Checkpoint A. The underlying CLI is `forgeflow` (run it as `py -3.13 -m forgeflow` on Windows; Python 3.13+ required, see [getting started](docs/getting-started.md)); it is not named `forge` because that name collides with other common tools.
+The user-facing name is **ForgeFlow**. Its short entry points are `/forge` for Claude Code and `$forge` for Codex, provided as repository-scoped skills. Both were exercised in the real clients during Checkpoints A and B. The underlying CLI is `forgeflow` (run it as `py -3.13 -m forgeflow` on Windows; Python 3.13+ required, see [getting started](docs/getting-started.md)); it is not named `forge` because that name collides with other common tools.
 
 | Operation | Status |
 | --- | --- |
 | `doctor`: environment, GitHub and provider inspection | implemented (read-only) |
 | `status`: local job state | implemented (read-only) |
-| `init`, `idea`, `design`, `approve` | planned, Checkpoint B |
+| `init`: setup check and GitHub Project binding | implemented |
+| `idea`: interactive discovery, durable outcomes | implemented |
+| `design`: one versioned engineering plan per job | implemented |
+| `approve`: Gate A, by a human at an interactive console | implemented |
+| `handoff`: approved plan to a GitHub issue + Project item | implemented (idempotent) |
 | `run`, `review`, `rework`, `resume` with real providers | planned, Checkpoint C |
 | knowledge sources (Markdown, optional Obsidian MCP) | planned, Checkpoint D |
 | `learn` | after v0.1 |
@@ -67,7 +71,8 @@ Packaging the skills for use in other repositories has not been validated yet.
 - [ADR 0001 — GitHub Projects and local execution state](docs/decisions/0001-github-projects-local-state.md)
 - [ADR 0002 — Optional knowledge sources and Obsidian](docs/decisions/0002-knowledge-sources-obsidian.md)
 - [ADR 0003 — Runtime, local job state, locking and worktrees](docs/decisions/0003-runtime-state-and-worktrees.md)
-- [Getting started (Checkpoint A, Windows)](docs/getting-started.md)
+- [ADR 0004 — Discovery, design, Gate A and GitHub handoff](docs/decisions/0004-planning-workflow-and-gate-a.md)
+- [Getting started (Checkpoints A and B, Windows)](docs/getting-started.md)
 - [MVP v0.1 scope and acceptance criteria](docs/mvp-scope.md)
 - [Development roadmap](docs/roadmap.md)
 - [Changelog and release history](CHANGELOG.md)

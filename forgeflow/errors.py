@@ -59,6 +59,10 @@ class GitHubScopeError(GitHubError):
         self.required_scope = required_scope
 
 
+class PathTooLongError(ForgeFlowError):
+    """A file path exceeds what Windows allows without long-path support; nothing was written."""
+
+
 class ToolNotFoundError(ForgeFlowError):
     """An external executable is not on PATH."""
 
