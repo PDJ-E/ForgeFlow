@@ -9,6 +9,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from unittest import mock
 
+import forgeflow
 from forgeflow import cli
 from forgeflow.environment import (
     Check,
@@ -170,6 +171,12 @@ class CliTests(GitRepoTestCase):
             code, out, _ = self.run_cli("doctor", "--offline")
         self.assertEqual(code, 1)
         self.assertIn("required checks failed", out)
+
+    def test_doctor_header_names_the_version(self) -> None:
+        report = EnvironmentReport([Check("git", "ok", True, "git 2.x")])
+        header = cli._format_report(report).splitlines()[0]
+        self.assertIn(forgeflow.__version__, header)
+        self.assertNotIn("Checkpoint", header)
 
 
 class SkillAdapterTests(unittest.TestCase):
