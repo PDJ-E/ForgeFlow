@@ -285,7 +285,7 @@ def check_providers(runner: Runner) -> list[Check]:
                 OK,
                 False,
                 f"available builders/reviewers: {', '.join(available)} "
-                "(detection only; execution arrives in Checkpoint C)",
+                "(`forgeflow run` checks each again before dispatching it)",
                 {"available": available},
             )
         )

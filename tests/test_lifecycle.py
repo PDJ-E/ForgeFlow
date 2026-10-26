@@ -151,7 +151,8 @@ class SimulatedLifecycleTests(GitRepoTestCase):
                 run_builder(self.store, lease, MockProvider("claude"), task)
         self.assertEqual(self.store.load(job.job_id).state, S.READY)
 
-    def test_real_providers_do_not_execute_yet(self) -> None:
+    def test_a_substitute_cli_is_always_reported_as_mocked(self) -> None:
+        """The real provider class with a stand-in executable never yields 'real' evidence."""
         job = self.ready_job(builder="claude", reviewer="codex")
         task = build_task(
             self.store,
@@ -160,10 +161,14 @@ class SimulatedLifecycleTests(GitRepoTestCase):
             acceptance_criteria=CRITERIA,
             allowed_paths=("src/*",),
         )
+        fake = ClaudeCodeProvider(command=self.fake_cli("claude", {"writes": {"src/a.py": "a\n"}}))
+        self.assertFalse(fake.real)
         with self.store.acquire_lease(job.job_id, "builder", "claude") as lease:
-            with self.assertRaisesRegex(ProviderError, "Checkpoint C"):
-                run_builder(self.store, lease, ClaudeCodeProvider(), task)
-        self.assertEqual(self.store.load(job.job_id).state, S.NEEDS_HUMAN)
+            result = run_builder(self.store, lease, fake, task, commit_message="test")
+        self.assertTrue(result.mocked)
+        job = self.store.load(job.job_id)
+        self.assertEqual(job.state, S.INTERRUPTED)  # released mid-phase, nothing delivered
+        self.assertTrue(all(e.mocked for e in job.evidence))
 
     def test_reviewer_task_cannot_write(self) -> None:
         job = self.ready_job()

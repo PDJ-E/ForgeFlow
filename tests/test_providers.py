@@ -3,23 +3,40 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import sys
+import tempfile
+import time
 import unittest
 from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from unittest import mock
 
-from forgeflow.errors import ValidationError
+from forgeflow.errors import ProviderError, ValidationError
 from forgeflow.jobs import Policy
-from forgeflow.proc import DEFAULT_TIMEOUT, CommandResult
+from forgeflow.proc import DEFAULT_TIMEOUT, CommandResult, pid_alive
 from forgeflow.providers import (
     NAMED_POLICIES,
     ClaudeCodeProvider,
     CodexProvider,
+    ProviderCapabilities,
+    ProviderResult,
     ProviderTask,
+    ProviderUnavailableError,
+    interpret_review,
     validate_policy,
 )
+from tests.support import FAKE_CLI, rmtree
+
+
+def _wait_dead(pid: int, seconds: float = 10) -> bool:
+    deadline = time.monotonic() + seconds
+    while pid_alive(pid):
+        if time.monotonic() > deadline:
+            return False
+        time.sleep(0.05)
+    return True
 
 
 class ScriptedRunner:
@@ -162,6 +179,177 @@ class LiveDetectionTests(unittest.TestCase):
                     self.skipTest(f"{provider.name} not installed")
                 self.assertIsNotNone(caps.version)
                 self.assertTrue(any(caps.features.values()), caps.features)
+
+
+class StubLease:
+    """Stands in for a held LeaseHandle; records the worker PIDs the provider reports."""
+
+    def __init__(self, job_id: str) -> None:
+        self.job_id = job_id
+        self.active = True
+        self.pids: list[int | None] = []
+
+    def set_worker_pid(self, pid: int | None) -> None:
+        self.pids.append(pid)
+
+
+class ExecutionTests(unittest.TestCase):
+    """The real provider classes driving tests/helpers/fake_cli.py (a real child process).
+
+    MOCKED: the CLI's output (captured formats of Claude Code 2.1.311 and Codex 0.164.0).
+    REAL: argv construction, stdin, subprocess and PID tracking, timeouts, parsing.
+    """
+
+    def setUp(self) -> None:
+        self.dir = Path(tempfile.mkdtemp(prefix="forgeflow-prov-"))
+        self.addCleanup(rmtree, self.dir)
+        self.lease = StubLease("ff-20261024-abcdef")
+
+    def cli(self, name: str, step: dict[str, Any]) -> list[str]:
+        script = self.dir / f"{name}-{len(list(self.dir.iterdir()))}.json"
+        script.write_text(json.dumps(step), encoding="utf-8")
+        return [sys.executable, str(FAKE_CLI), name, str(script)]
+
+    def log(self, command: list[str]) -> list[dict[str, Any]]:
+        text = Path(command[3]).with_suffix(".log").read_text(encoding="utf-8")
+        return [json.loads(line) for line in text.splitlines()]
+
+    def task(self, **overrides: Any) -> ProviderTask:
+        work = self.dir / "work"
+        work.mkdir(exist_ok=True)
+        return _task(worktree_path=str(work), **overrides)
+
+    def execute(self, provider: Any, task: ProviderTask) -> ProviderResult:
+        result: ProviderResult = provider.execute(task, cast(Any, self.lease))
+        return result
+
+    def test_claude_builder_invocation_and_result(self) -> None:
+        command = self.cli("claude", {"writes": {"src/a.py": "x\n"}, "result": "made a.py"})
+        result = self.execute(ClaudeCodeProvider(command=command), self.task())
+        self.assertEqual(
+            (result.status, result.summary, result.mocked), ("succeeded", "made a.py", True)
+        )
+        self.assertEqual(result.usage.tokens, "measured")
+        self.assertEqual((result.usage.input_tokens, result.usage.output_tokens), (153, 20))
+        self.assertEqual(result.usage.cost, "api-equivalent-estimate")
+        [start, _end] = self.log(command)
+        argv = start["argv"]
+        for flag in ("-p", "--restricted", "--strict-mcp-config", "--no-session-persistence"):
+            self.assertIn(flag, argv)
+        self.assertEqual(argv[argv.index("--tools") + 1], "Read,Edit,Write,Glob,Grep")
+        self.assertEqual(argv[argv.index("--permission-mode") + 1], "acceptEdits")
+        self.assertEqual(argv[argv.index("--permission-prompts") + 1], "none")
+        self.assertNotIn("Bash", " ".join(argv))
+        self.assertIn("# Plan", start["prompt"], "the approved plan travels on stdin")
+        self.assertEqual(self.lease.pids, [start["pid"], None])
+
+    def test_claude_reviewer_is_read_only_and_findings_decide_the_verdict(self) -> None:
+        review = {
+            "verdict": "approve",
+            "summary": "ok",
+            "findings": [
+                {"severity": "blocking", "file": "a.py", "issue": "crash", "suggestion": ""}
+            ],
+        }
+        command = self.cli("claude", {"review": review})
+        task = self.task(role="reviewer", allowed_operations=("read",), review_commit="a" * 40)
+        result = self.execute(ClaudeCodeProvider(command=command), task)
+        self.assertEqual(result.verdict, "request-changes")
+        self.assertEqual(result.findings, ("[blocking] a.py: crash",))
+        argv = self.log(command)[0]["argv"]
+        self.assertEqual(argv[argv.index("--tools") + 1], "Read,Glob,Grep")
+        self.assertIn("--json-schema", argv)
+
+    def test_claude_errors_are_failures(self) -> None:
+        for step in ({"is_error": True, "result": "Credit balance too low"}, {"exit": 1}):
+            with self.subTest(step):
+                result = self.execute(
+                    ClaudeCodeProvider(command=self.cli("claude", step)), self.task()
+                )
+                self.assertEqual(result.status, "failed")
+
+    def test_codex_builder_and_reviewer_invocations(self) -> None:
+        command = self.cli("codex", {"result": "built"})
+        result = self.execute(CodexProvider(command=command), self.task())
+        self.assertEqual((result.status, result.summary), ("succeeded", "built"))
+        argv = self.log(command)[0]["argv"]
+        self.assertEqual(argv[argv.index("-s") + 1], "workspace-write")
+        self.assertEqual(argv[argv.index("-C") + 1], str(self.dir / "work"))
+        self.assertIn('approval_policy="never"', argv)
+        self.assertEqual(argv[-1], "-")
+
+        review = {
+            "verdict": "request-changes",
+            "summary": "nit",
+            "findings": [
+                {"severity": "minor", "file": "a.py", "issue": "naming", "suggestion": "rename"}
+            ],
+        }
+        command = self.cli("codex", {"review": review})
+        task = self.task(role="reviewer", allowed_operations=("read",), review_commit="a" * 40)
+        result = self.execute(CodexProvider(command=command), task)
+        self.assertEqual(result.verdict, "approve", "minor findings do not request changes")
+        argv = self.log(command)[0]["argv"]
+        self.assertEqual(argv[argv.index("-s") + 1], "read-only")
+        self.assertIn("--output-schema", argv)
+        self.assertIn("--skip-git-repo-check", argv)
+
+    def test_codex_sandbox_refusal_is_reported_as_blocked(self) -> None:
+        command = self.cli("codex", {"sandbox_refusal": True})
+        result = self.execute(CodexProvider(command=command), self.task())
+        self.assertEqual(result.status, "blocked")
+        self.assertTrue(any("refusing to run unsandboxed" in n for n in result.notes))
+
+    def test_a_provider_that_overruns_is_killed(self) -> None:
+        command = self.cli("claude", {"sleep": 30})
+        started = time.monotonic()
+        result = self.execute(ClaudeCodeProvider(command=command), self.task(timeout_seconds=1))
+        self.assertEqual(result.status, "timed_out")
+        self.assertLess(time.monotonic() - started, 20)
+        pid = self.log(command)[0]["pid"]
+        self.assertTrue(_wait_dead(pid), "the provider process tree must be gone")
+        self.assertEqual(self.lease.pids[-1], None)
+
+    def test_malformed_reviews_are_errors_not_approvals(self) -> None:
+        answers: list[Any] = [None, [], {"verdict": "lgtm", "findings": []}, {"verdict": "approve"}]
+        for answer in answers:
+            with self.subTest(answer), self.assertRaises(ProviderError):
+                interpret_review("x", answer)
+
+
+class PreflightTests(unittest.TestCase):
+    def detected(self, provider: Any, **caps: Any) -> Any:
+        found = ProviderCapabilities(provider.name, "/bin/x", version="1.0", **caps)
+        return mock.patch.object(type(provider), "detect", return_value=found)
+
+    def test_missing_options_and_login_are_blockers(self) -> None:
+        claude = ClaudeCodeProvider()
+        with self.detected(claude, authenticated=False, features={"--print": True}):
+            with self.assertRaises(ProviderUnavailableError) as ctx:
+                claude.preflight("reviewer")
+        message = str(ctx.exception)
+        self.assertIn("not logged in", message)
+        self.assertIn("--json-schema", message)
+
+    def test_a_ready_provider_passes(self) -> None:
+        codex = CodexProvider()
+        features = dict.fromkeys(CodexProvider.feature_flags, True)
+        with self.detected(codex, authenticated=True, features=features):
+            codex.preflight("reviewer")
+            codex.preflight("builder", Path.home() / "repo" / ".forge" / "worktrees" / "x")
+
+    @unittest.skipUnless(sys.platform == "win32", "Codex's TEMP refusal is a Windows sandbox trait")
+    def test_codex_refuses_a_worktree_under_temp_on_windows(self) -> None:
+        codex = CodexProvider()
+        features = dict.fromkeys(CodexProvider.feature_flags, True)
+        with self.detected(codex, authenticated=True, features=features):
+            with self.assertRaisesRegex(ProviderUnavailableError, "TEMP"):
+                codex.preflight("builder", Path(tempfile.gettempdir()) / "repo")
+
+    def test_missing_executable(self) -> None:
+        with mock.patch("forgeflow.providers.which", return_value=None):
+            with self.assertRaisesRegex(ProviderUnavailableError, "not installed"):
+                CodexProvider().preflight("builder")
 
 
 if __name__ == "__main__":

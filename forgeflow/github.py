@@ -5,8 +5,11 @@ Reads: an issue in the job's repository, the Project items it is on, a pull requ
 
 Writes (Checkpoint B, used only by ``forgeflow.handoff`` after Gate A): create an issue, comment
 on an issue, add an issue to an existing Project and set its Status to an existing option.
-ForgeFlow never creates or edits Projects, fields, options, labels or repository settings, so
-the user's board stays the single source of truth (ADR 0001).
+Checkpoint C adds, for ``forgeflow.delivery`` and ``forgeflow.board`` only: open a **draft**
+pull request from the job's branch, update its title and body, turn it back into a draft, and
+set the Status of the job's own Project item. ForgeFlow never merges, closes issues, or creates
+or edits Projects, fields, options, labels or repository settings, so the user's board stays
+the single source of truth (ADR 0001).
 """
 
 from __future__ import annotations
@@ -118,6 +121,13 @@ mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $optionId: String!) {
 """
 
 
+_CONVERT_TO_DRAFT_MUTATION = """
+mutation($id: ID!) {
+  convertPullRequestToDraft(input: {pullRequestId: $id}) { pullRequest { isDraft } }
+}
+"""
+
+
 @dataclass(frozen=True)
 class LinkResult:
     job: Job
@@ -152,6 +162,40 @@ class ProjectInfo:
             if option.casefold() == name.casefold():
                 return option_id
         return None
+
+
+@dataclass(frozen=True)
+class PullRequestSummary:
+    """A pull request as listed or written through the REST API (delivery bookkeeping)."""
+
+    number: int
+    url: str
+    node_id: str
+    state: str  # "open" | "closed"
+    draft: bool
+    merged: bool
+    head_ref: str
+    head_sha: str
+    base_ref: str
+    body: str
+
+    @classmethod
+    def from_rest(cls, data: Any) -> PullRequestSummary:
+        try:
+            return cls(
+                number=int(data["number"]),
+                url=str(data["html_url"]),
+                node_id=str(data["node_id"]),
+                state=str(data["state"]),
+                draft=bool(data.get("draft")),
+                merged=bool(data.get("merged_at")),
+                head_ref=str(data["head"]["ref"]),
+                head_sha=str(data["head"]["sha"]),
+                base_ref=str(data["base"]["ref"]),
+                body=str(data.get("body") or ""),
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise GitHubError("unexpected pull request data from GitHub") from exc
 
 
 @dataclass(frozen=True)
@@ -302,6 +346,37 @@ class GitHubClient:
                 "optionId": option_id,
             },
         )
+
+    # --- pull requests (delivery only, after checks and review passed) ---------------------------
+
+    def pull_requests_for_branch(self, repo: str, branch: str) -> list[PullRequestSummary]:
+        """Every pull request (open or closed) whose head is ``branch`` of ``repo`` itself."""
+        owner, _ = _split_slug(repo)
+        data = self.rest("GET", f"repos/{repo}/pulls?head={owner}:{branch}&state=all&per_page=100")
+        return [PullRequestSummary.from_rest(p) for p in data or []]
+
+    def create_draft_pull_request(
+        self, repo: str, *, head: str, base: str, title: str, body: str
+    ) -> PullRequestSummary:
+        _split_slug(repo)
+        data = self.rest(
+            "POST",
+            f"repos/{repo}/pulls",
+            {"title": title, "head": head, "base": base, "body": body, "draft": True},
+        )
+        return PullRequestSummary.from_rest(data)
+
+    def update_pull_request(
+        self, repo: str, number: int, *, title: str, body: str
+    ) -> PullRequestSummary:
+        _split_slug(repo)
+        data = self.rest(
+            "PATCH", f"repos/{repo}/pulls/{int(number)}", {"title": title, "body": body}
+        )
+        return PullRequestSummary.from_rest(data)
+
+    def convert_to_draft(self, node_id: str) -> None:
+        self.graphql(_CONVERT_TO_DRAFT_MUTATION, {"id": node_id})
 
     def view_issue(self, repo: str, number: int) -> IssueLink:
         owner, name = _split_slug(repo)

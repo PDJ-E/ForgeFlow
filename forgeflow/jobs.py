@@ -1,4 +1,4 @@
-"""Job record (schema v1), lifecycle states and the explicit transition table.
+"""Job record (schema v3), lifecycle states and the explicit transition table.
 
 The record is the local technical execution state of one approved unit of work (ADR 0001).
 GitHub remains authoritative for the work item itself; the job stores references to it.
@@ -16,12 +16,14 @@ from typing import Any
 from forgeflow.errors import ValidationError
 from forgeflow.proc import redact_credentials
 
-SCHEMA_VERSION = 2
-# Version 1 (Checkpoint A) records load unchanged: every field added in 2 is optional.
-READABLE_SCHEMA_VERSIONS = frozenset({1, 2})
+SCHEMA_VERSION = 3
+# Older records load unchanged: every field added in 2 (Checkpoint B) and 3 (Checkpoint C) is
+# optional. Version 3 is written so that older ForgeFlow versions refuse, rather than silently
+# drop, the delivery and board records.
+READABLE_SCHEMA_VERSIONS = frozenset({1, 2, 3})
 DEFAULT_MAX_REWORK = 2
 # Builder of a job created by discovery. No provider has this name, so no builder lease can be
-# taken until Checkpoint C assigns a real one.
+# taken until the human names one (`forgeflow run --builder ...`, JobStore.assign_providers).
 UNASSIGNED_PROVIDER = "unassigned"
 # The only way a plan approval is captured (forgeflow.approval). Anything else is refused.
 HUMAN_APPROVAL_METHOD = "interactive-console"
@@ -421,6 +423,67 @@ class Handoff:
 
 
 @dataclass
+class Delivery:
+    """Progress of delivering a validated commit as a draft PR (forgeflow.delivery). Resumable.
+
+    Recorded before anything is pushed, so an interrupted delivery finds its branch and PR
+    again instead of creating a second one.
+    """
+
+    marker: str  # hidden trace marker in the PR body
+    branch: str
+    started_at: str
+    pushed_sha: str | None = None  # last commit pushed to the job's branch
+    pr_number: int | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "marker": self.marker,
+            "branch": self.branch,
+            "started_at": self.started_at,
+            "pushed_sha": self.pushed_sha,
+            "pr_number": self.pr_number,
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any], where: str) -> Delivery:
+        return cls(
+            marker=_get(d, "marker", str, where),
+            branch=_get(d, "branch", str, where),
+            started_at=_get(d, "started_at", str, where),
+            pushed_sha=_get(d, "pushed_sha", str, where, optional=True),
+            pr_number=_get(d, "pr_number", int, where, optional=True),
+        )
+
+
+@dataclass
+class BoardSync:
+    """The Project Status ForgeFlow last derived from the job state, and what it read back."""
+
+    state: str  # the job state the Status was derived from
+    status: str | None  # Status read back from the Project after the sync
+    synced_at: str
+    error: str | None = None  # why the last attempt did not converge (the next sync retries)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "state": self.state,
+            "status": self.status,
+            "synced_at": self.synced_at,
+            "error": self.error,
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any], where: str) -> BoardSync:
+        return cls(
+            state=_get(d, "state", str, where),
+            status=_get(d, "status", str, where, optional=True),
+            synced_at=_get(d, "synced_at", str, where),
+            error=_get(d, "error", str, where, optional=True),
+        )
+
+
+@dataclass
 class GitHubLinks:
     issue: IssueLink | None = None
     project_items: list[ProjectItemLink] = field(default_factory=list)
@@ -428,6 +491,8 @@ class GitHubLinks:
     project_lookup: str = "not-checked"
     pull_request: PullRequestLink | None = None
     handoff: Handoff | None = None
+    delivery: Delivery | None = None
+    board: BoardSync | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -436,6 +501,8 @@ class GitHubLinks:
             "project_lookup": self.project_lookup,
             "pull_request": self.pull_request.to_dict() if self.pull_request else None,
             "handoff": self.handoff.to_dict() if self.handoff else None,
+            "delivery": self.delivery.to_dict() if self.delivery else None,
+            "board": self.board.to_dict() if self.board else None,
         }
 
     @classmethod
@@ -443,6 +510,8 @@ class GitHubLinks:
         issue = _obj(d, "issue", where, optional=True)
         pr = _obj(d, "pull_request", where, optional=True)
         handoff = _obj(d, "handoff", where, optional=True)
+        delivery = _obj(d, "delivery", where, optional=True)
+        board = _obj(d, "board", where, optional=True)
         items = _get(d, "project_items", list, where, optional=True) or []
         parsed_items = []
         for i, item in enumerate(items):
@@ -455,15 +524,20 @@ class GitHubLinks:
             project_lookup=_get(d, "project_lookup", str, where, optional=True) or "not-checked",
             pull_request=PullRequestLink.from_dict(pr, f"{where}.pull_request") if pr else None,
             handoff=Handoff.from_dict(handoff, f"{where}.handoff") if handoff else None,
+            delivery=Delivery.from_dict(delivery, f"{where}.delivery") if delivery else None,
+            board=BoardSync.from_dict(board, f"{where}.board") if board else None,
         )
 
 
 @dataclass
 class Attempts:
     build: int = 0  # builder dispatches, including rework rounds and resumes
-    rework: int = 0  # rounds triggered by failed checks or review findings
+    # Rework rounds (failed checks, review findings, a human rework request) since the last
+    # human decision to continue an escalated job; bounded by max_rework.
+    rework: int = 0
     resumes: int = 0  # recoveries after interruption
     max_rework: int = DEFAULT_MAX_REWORK
+    human_resumes: int = 0  # times a human continued an escalated job (needs_human -> ready)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -471,16 +545,17 @@ class Attempts:
             "rework": self.rework,
             "resumes": self.resumes,
             "max_rework": self.max_rework,
+            "human_resumes": self.human_resumes,
         }
 
     @classmethod
     def from_dict(cls, d: dict[str, Any], where: str = "attempts") -> Attempts:
-        return cls(
-            **{
-                k: _non_negative(_get(d, k, int, where), f"{where}.{k}")
-                for k in ("build", "rework", "resumes", "max_rework")
-            }
-        )
+        counts = {
+            k: _non_negative(_get(d, k, int, where), f"{where}.{k}")
+            for k in ("build", "rework", "resumes", "max_rework")
+        }
+        human = _get(d, "human_resumes", int, where, optional=True) or 0
+        return cls(**counts, human_resumes=_non_negative(human, f"{where}.human_resumes"))
 
 
 @dataclass
@@ -525,13 +600,15 @@ class Lease:
 
 @dataclass
 class Evidence:
-    kind: str  # e.g. "provider-result", "checks", "review"
+    kind: str  # e.g. "provider-result", "build-commit", "checks", "review"
     path: str  # relative to the job directory
-    status: str  # e.g. "passed", "failed", "succeeded", "recorded"
+    status: str  # e.g. "passed", "failed", "succeeded", "approve", "request-changes"
     mocked: bool  # True when produced by a mock provider or fixture, never by a real run
     created_at: str
     build_round: int = 0  # attempts.build when recorded: evidence from older rounds is stale
-    commit: str | None = None  # for "checks": the worktree commit the commands ran against
+    # "checks": the worktree commit the commands ran against (only run_checks sets it).
+    # "review": the commit the reviewer examined. "build-commit": the commit ForgeFlow made.
+    commit: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {

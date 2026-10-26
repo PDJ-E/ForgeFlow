@@ -1,0 +1,249 @@
+"""The Checkpoint C driver: build, checks, review, bounded rework and escalation.
+
+REAL: git, worktrees, ForgeFlow's commits, the check commands, leases, provider subprocesses
+(the fake CLI runs as a real child process whose PID the lease records).
+MOCKED: the models (tests/helpers/fake_cli.py behind the real Claude/Codex provider classes)
+and GitHub (FakeGitHubWorld). Because the providers are simulated, no run here is ever
+delivered: every one ends before any push, which the tests assert. Delivery itself is covered
+in test_delivery with real commits and checks.
+"""
+
+from __future__ import annotations
+
+import unittest
+from unittest import mock
+
+from forgeflow.errors import InvalidTransitionError, ValidationError
+from forgeflow.jobs import JobState
+from forgeflow.pipeline import acceptance_criteria, feedback_for
+from forgeflow.providers import ClaudeCodeProvider, CodexProvider, ProviderUnavailableError
+from tests.pipeline_support import APPROVE, PipelineTestCase, request_changes
+from tests.support import run_git
+
+S = JobState
+HELLO = {"writes": {"greet.txt": "hello\n"}, "result": "said hello"}
+HI = {"writes": {"greet.txt": "hi\n"}, "result": "said hi"}
+
+
+class HappyPathTests(PipelineTestCase):
+    def test_a_simulated_build_runs_every_phase_and_is_never_delivered(self) -> None:
+        job = self.handed_off_job()
+        factory, builder, reviewer = self.providers(HELLO, {"review": APPROVE})
+        job = self.run_pipeline(job.job_id, factory)
+
+        self.assertEqual(job.state, S.NEEDS_HUMAN)
+        self.assertEqual((job.policy.builder, job.policy.reviewer), ("claude", "codex"))
+        kinds = [(e.kind, e.status, e.mocked) for e in job.evidence]
+        self.assertEqual(
+            kinds,
+            [
+                ("provider-result", "succeeded", True),
+                ("build-commit", "committed", True),
+                ("checks", "passed", False),
+                ("review", "approve", True),
+            ],
+        )
+        # ForgeFlow committed the builder's file on the job branch, never on main.
+        worktree = self.worktree(job)
+        self.assertEqual((worktree / "greet.txt").read_text("utf-8"), "hello\n")
+        self.assertEqual((self.repo / "greet.txt").read_text("utf-8"), "todo\n")
+        self.assertEqual(run_git(self.repo, "branch", "--show-current"), "main")
+        self.assertEqual(run_git(worktree, "status", "--porcelain"), "")
+        checks = [e for e in job.evidence if e.kind == "checks"][-1]
+        self.assertEqual(checks.commit, run_git(worktree, "rev-parse", "HEAD"))
+        # Simulated: nothing pushed, no PR.
+        self.assertEqual(run_git(self.remote, "for-each-ref"), "")
+        self.assertEqual(self.world.pulls, {})
+        self.assertIn("simulated build", " ".join(self.lines))
+        # The board followed the job through every phase.
+        self.assertEqual(self.statuses_set(), ["Ready", "Building", "QA", "Review", "Blocked"])
+        self.assertEqual(self.board_status(job), "Blocked")
+        # The builder ran in the worktree, the reviewer somewhere else.
+        (build_start, *_), (review_start, *_) = (
+            self.fake_cli_log(builder),
+            self.fake_cli_log(reviewer),
+        )
+        self.assertEqual(build_start["cwd"], str(worktree))
+        self.assertNotEqual(review_start["cwd"], str(worktree))
+        self.assertIn("-s", review_start["argv"])
+        self.assertEqual(review_start["argv"][review_start["argv"].index("-s") + 1], "read-only")
+        self.assertIsNone(job.lease)
+
+    def test_the_issue_is_never_closed(self) -> None:
+        job = self.handed_off_job()
+        factory, _, _ = self.providers(HELLO, {"review": APPROVE})
+        self.run_pipeline(job.job_id, factory)
+        self.assertEqual({i["state"] for i in self.world.issues.values()}, {"OPEN"})
+
+
+class ReworkTests(PipelineTestCase):
+    def test_failed_checks_trigger_one_bounded_rework_round(self) -> None:
+        job = self.handed_off_job()
+        factory, builder, _ = self.providers([HI, HELLO], {"review": APPROVE})
+        job = self.run_pipeline(job.job_id, factory)
+        self.assertEqual((job.attempts.build, job.attempts.rework), (2, 1))
+        checks = [e.status for e in job.evidence if e.kind == "checks"]
+        self.assertEqual(checks, ["failed", "passed"])
+        prompts = [r["prompt"] for r in self.fake_cli_log(builder) if r["event"] == "start"]
+        self.assertNotIn("previous round", prompts[0])
+        self.assertIn("Check 'greeting' failed", prompts[1])
+        # Each round's checks ran on that round's own commit.
+        commits = [e.commit for e in job.evidence if e.kind == "checks"]
+        self.assertEqual(len(set(commits)), 2)
+
+    def test_the_rework_limit_escalates_to_a_human(self) -> None:
+        job = self.handed_off_job()
+        factory, builder, reviewer = self.providers(HI, {"review": APPROVE})
+        job = self.run_pipeline(job.job_id, factory)
+        self.assertEqual(job.state, S.NEEDS_HUMAN)
+        self.assertEqual((job.attempts.build, job.attempts.rework), (3, 2))
+        self.assertEqual(len([r for r in self.fake_cli_log(builder) if r["event"] == "start"]), 3)
+        self.assertEqual(self.fake_cli_log(reviewer), [], "failing builds are not reviewed")
+        self.assertIn("checks still fail", " ".join(self.lines))
+        self.assertEqual(self.board_status(job), "Blocked")
+
+    def test_review_findings_trigger_rework_but_minor_ones_do_not(self) -> None:
+        job = self.handed_off_job()
+        reviews = [
+            {"review": request_changes("the greeting is missing a newline check")},
+            {
+                "review": {
+                    **request_changes("consider a comma", "minor"),
+                    "verdict": "request-changes",
+                }
+            },
+        ]
+        factory, builder, reviewer = self.providers([HELLO, HELLO], reviews)
+        job = self.run_pipeline(job.job_id, factory)
+        statuses = [e.status for e in job.evidence if e.kind == "review"]
+        # The second review says "request-changes" but lists only a minor finding: no rework.
+        self.assertEqual(statuses, ["request-changes", "approve"])
+        self.assertEqual(job.attempts.rework, 1)
+        prompts = [r["prompt"] for r in self.fake_cli_log(builder) if r["event"] == "start"]
+        self.assertIn("Reviewer finding: [major] greet.txt: the greeting is missing", prompts[1])
+        self.assertEqual(len([r for r in self.fake_cli_log(reviewer) if r["event"] == "start"]), 2)
+
+    def test_a_human_can_continue_an_escalated_job_with_a_reason(self) -> None:
+        job = self.handed_off_job()
+        factory, builder, _ = self.providers([HI, HI, HI, HELLO], {"review": APPROVE})
+        job = self.run_pipeline(job.job_id, factory)
+        self.assertEqual(job.state, S.NEEDS_HUMAN)
+        with self.assertRaisesRegex(ValidationError, "--reason"):
+            self.run_pipeline(job.job_id, factory)
+        job = self.run_pipeline(job.job_id, factory, reason="the check expects 'hello'")
+        self.assertEqual(job.attempts.human_resumes, 1)
+        self.assertEqual(job.attempts.build, 4)
+        self.assertEqual([e.status for e in job.evidence if e.kind == "checks"][-1], "passed")
+        last_prompt = [r["prompt"] for r in self.fake_cli_log(builder) if r["event"] == "start"][-1]
+        self.assertIn("the check expects 'hello'", last_prompt)
+
+
+class SafetyTests(PipelineTestCase):
+    def test_out_of_scope_changes_are_kept_uncommitted_and_escalated(self) -> None:
+        job = self.handed_off_job()
+        rogue = {"writes": {"greet.txt": "hello\n", ".forge/forgeflow.toml": "[checks]\n"}}
+        factory, _, reviewer = self.providers(rogue, {"review": APPROVE})
+        job = self.run_pipeline(job.job_id, factory)
+        self.assertEqual(job.state, S.NEEDS_HUMAN)
+        worktree = self.worktree(job)
+        assert job.worktree is not None
+        self.assertEqual(run_git(worktree, "rev-parse", "HEAD"), job.worktree.base_sha)
+        status = run_git(worktree, "status", "--porcelain")
+        self.assertIn(".forge/forgeflow.toml", status)  # left exactly where it was
+        self.assertEqual((worktree / ".forge" / "forgeflow.toml").read_text("utf-8"), "[checks]\n")
+        self.assertIn("scope-violation", [e.kind for e in job.evidence])
+        self.assertEqual(self.fake_cli_log(reviewer), [])
+
+    def test_an_unavailable_reviewer_blocks_before_anything_is_dispatched(self) -> None:
+        job = self.handed_off_job()
+        builder = self.fake_cli("claude", HELLO)
+        made = {"claude": ClaudeCodeProvider(command=builder), "codex": CodexProvider()}
+        with mock.patch("forgeflow.providers.which", return_value=None):
+            with self.assertRaisesRegex(ProviderUnavailableError, "codex cannot run as reviewer"):
+                self.run_pipeline(job.job_id, made.__getitem__)
+        job = self.store.load(job.job_id)
+        self.assertEqual(job.state, S.PLAN_APPROVED)
+        self.assertIsNone(job.worktree)
+        self.assertEqual(self.fake_cli_log(builder), [])
+
+    def test_a_failing_reviewer_never_counts_as_an_approval(self) -> None:
+        job = self.handed_off_job()
+        factory, _, _ = self.providers(HELLO, {"exit": 1, "stderr": "auth expired"})
+        job = self.run_pipeline(job.job_id, factory)
+        self.assertEqual(job.state, S.NEEDS_HUMAN)
+        self.assertNotIn("approve", [e.status for e in job.evidence if e.kind == "review"])
+        self.assertIn("Nothing was approved", " ".join(self.lines))
+
+    def test_the_reviewer_cannot_touch_the_build(self) -> None:
+        job = self.handed_off_job()
+        sneaky = {"review": APPROVE, "writes": {"greet.txt": "hijacked\n"}}
+        factory, _, reviewer = self.providers(HELLO, sneaky)
+        job = self.run_pipeline(job.job_id, factory)
+        worktree = self.worktree(job)
+        self.assertEqual((worktree / "greet.txt").read_text("utf-8"), "hello\n")
+        self.assertEqual(run_git(worktree, "status", "--porcelain"), "")
+        snapshot = self.fake_cli_log(reviewer)[0]["cwd"]
+        self.assertNotIn(str(self.repo), snapshot)
+
+    def test_codex_sandbox_refusal_is_a_blocker_not_a_fallback(self) -> None:
+        job = self.handed_off_job()
+        refused = self.fake_cli("codex", {"sandbox_refusal": True})
+        made = {"codex": CodexProvider(command=refused), "claude": ClaudeCodeProvider()}
+        with mock.patch.object(ClaudeCodeProvider, "preflight"):
+            job = self.run_pipeline(
+                job.job_id, made.__getitem__, builder="codex", reviewer="claude"
+            )
+        self.assertEqual(job.state, S.NEEDS_HUMAN)
+        self.assertEqual([e.status for e in job.evidence][:1], ["blocked"])
+        self.assertIn("sandbox", " ".join(self.lines))
+
+    def test_gate_a_and_the_handoff_come_first(self) -> None:
+        factory, builder, _ = self.providers(HELLO, {"review": APPROVE})
+        draft = self.new_job()
+        with self.assertRaisesRegex(InvalidTransitionError, "Gate A"):
+            self.run_pipeline(draft.job_id, factory)
+        approved = self.approved_job()
+        with self.assertRaisesRegex(InvalidTransitionError, "handoff"):
+            self.run_pipeline(approved.job_id, factory)
+        self.assertEqual(self.fake_cli_log(builder), [])
+
+    def test_providers_must_be_chosen_explicitly(self) -> None:
+        job = self.handed_off_job()
+        factory, _, _ = self.providers(HELLO, {"review": APPROVE})
+        with self.assertRaisesRegex(ValidationError, "explicitly"):
+            self.run_pipeline(job.job_id, factory, builder=None, reviewer=None)
+
+    def test_no_checks_configured_is_refused(self) -> None:
+        run_git(self.repo, "rm", "-q", ".forge/forgeflow.toml")
+        run_git(self.repo, "commit", "-q", "-m", "drop config")
+        run_git(self.repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+        job = self.handed_off_job()
+        factory, builder, _ = self.providers(HELLO, {"review": APPROVE})
+        with self.assertRaisesRegex(ValidationError, "does not build without"):
+            self.run_pipeline(job.job_id, factory)
+        self.assertEqual(self.fake_cli_log(builder), [])
+
+    def test_a_job_at_gate_b_is_not_run_again(self) -> None:
+        job = self.handed_off_job()
+        self.tamper(job.job_id, lambda d: d.update(state="awaiting_merge_approval"))
+        factory, _, _ = self.providers(HELLO, {"review": APPROVE})
+        with self.assertRaisesRegex(InvalidTransitionError, "Gate B"):
+            self.run_pipeline(job.job_id, factory)
+
+
+class HelperTests(PipelineTestCase):
+    def test_acceptance_criteria_are_read_from_the_plan(self) -> None:
+        plan = "# T\n\n## Acceptance criteria\n\n- [ ] one\n- [x] two\n- [ ] one\n"
+        self.assertEqual(acceptance_criteria(plan, "fallback"), ("one", "two"))
+        self.assertEqual(acceptance_criteria("# T\n", "fallback"), ("fallback",))
+
+    def test_feedback_is_rebuilt_from_the_record(self) -> None:
+        job = self.handed_off_job()
+        factory, _, _ = self.providers(HI, {"review": APPROVE})
+        job = self.run_pipeline(job.job_id, factory)
+        feedback = feedback_for(self.store, job)
+        self.assertTrue(any("Check 'greeting' failed" in f for f in feedback))
+
+
+if __name__ == "__main__":
+    unittest.main()

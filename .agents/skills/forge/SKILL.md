@@ -1,9 +1,9 @@
 ---
 name: forge
-description: ForgeFlow entry point - interactive product discovery (idea), engineering design, handing an approved plan to GitHub, job status and environment checks. Use only when the user explicitly invokes $forge.
+description: ForgeFlow entry point - interactive product discovery (idea), engineering design, handing an approved plan to GitHub, running an approved job (build, checks, review, draft PR), job status and environment checks. Use only when the user explicitly invokes $forge.
 ---
 
-# $forge - ForgeFlow (Checkpoint B)
+# $forge - ForgeFlow (Checkpoint C)
 
 The operation is the text the user wrote after `$forge`.
 
@@ -27,6 +27,10 @@ Run commands from the repository root and report their output faithfully, warnin
 | submit for approval | `python -m forgeflow design submit <job>` |
 | withdraw to revise | `python -m forgeflow design revise <job> --reason "..."` |
 | publish an approved plan | `python -m forgeflow handoff <job>` (`--dry-run` previews) |
+| build, check, review, open a draft PR | `python -m forgeflow run <job> --builder claude|codex --reviewer claude|codex` |
+| continue after an interruption | `python -m forgeflow resume <job>` |
+| another round on the draft PR | `python -m forgeflow rework <job> --reason "..."` |
+| record a merge, sync the board | `python -m forgeflow sync <job>` |
 
 `<job>` is the short reference ForgeFlow prints (for example `J3`) or the full id
 (`ff-YYYYMMDD-xxxxxx`). Use the short reference when talking to the user.
@@ -34,7 +38,7 @@ Run commands from the repository root and report their output faithfully, warnin
 Kinds: problem, user, goal, requirement, constraint, assumption, alternative, decision, risk,
 question, non-goal.
 
-Not implemented yet: `run`, `review`, `rework`, `resume`, `learn`. Say so and stop.
+Not implemented yet: `learn`. Say so and stop.
 
 Codex notes: discovery and design write only inside `.forge/runtime/` of this workspace, which
 the default workspace-write sandbox allows. `init`, `doctor` and `handoff` contact GitHub; if the
@@ -94,6 +98,30 @@ It shows the exact plan version, its hash and what approval authorises, asks
 GitHub Project.
 If it is run without an interactive console it exits with code 3 and records nothing.
 
+## run - build, checks, review and a draft PR (Checkpoint C)
+
+Only for a job whose plan a human approved and handed off. Run it only when the user asks and
+names **both** the builder and the reviewer; never pick them yourself. The reviewer may be the
+other provider (cross-review) or the same one.
+
+    python -m forgeflow run <job> --builder claude --reviewer codex
+
+ForgeFlow does everything itself: it prepares the job's worktree, runs the builder there, checks
+and commits its changes, runs the repository's checks (`.forge/forgeflow.toml`), has the
+reviewer judge a read-only snapshot, reworks at most twice, pushes the job branch and opens a
+**draft** pull request. A build can take many minutes; tell the user it is running. Report the
+outcome it prints: the PR link (Gate B: the owner merges, never you), or why it stopped for a
+human (exit code 4) and what it says to do next. `run`, `resume` and `rework` also need the
+network and start other agent CLIs, so suggest running them in the user's own terminal when
+this session cannot.
+
+- `resume <job>`: after an interruption; same providers, never a second builder.
+- `rework <job> --reason "..."`: only when the user asks for changes to a delivered draft PR.
+- `sync <job>`: after the owner merged the PR on GitHub (records it, Project Status Done), or to
+  bring the Project Status in line with the job.
+- A job that stopped for a human continues only when the user gives the reason:
+  `run <job> --reason "..."` (optionally with other `--builder` / `--reviewer`).
+
 ## handoff
 
 Only after approval: `python -m forgeflow handoff <job>` publishes (or finishes publishing) the
@@ -102,7 +130,8 @@ and never creates duplicates. It refuses unapproved or changed plans.
 
 ## Rules
 
-- Never write or change code, create worktrees, branches, issues, Project items or PRs by hand
+- Never write or change the job's code yourself, and never create worktrees, branches, commits, issues,
+  Project items or PRs by hand
   (no `gh issue create`), or dispatch any builder. Only ForgeFlow commands publish to GitHub.
 - Edit only the job's plan file, and only during `design`.
 - ForgeFlow needs Python 3.13+. If a command fails with `ForgeFlow requires Python 3.13 or newer`,

@@ -40,6 +40,7 @@ import hashlib
 import os
 import re
 import secrets
+import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -104,6 +105,8 @@ _LEASE_START_STATES = frozenset({S.READY, S.INTERRUPTED, S.AWAITING_MERGE_APPROV
 _LEASE_ENDING_STATES = TERMINAL_STATES | {S.NEEDS_HUMAN, S.AWAITING_MERGE_APPROVAL}
 # worker_status() answers that must keep the job owned.
 _WORKER_BLOCKING = frozenset({"running", "unverifiable"})
+# States in which a human may choose (or change) the job's builder and reviewer.
+_ASSIGNABLE_STATES = frozenset({S.PLAN_APPROVED, S.READY, S.NEEDS_HUMAN})
 # JSON documents beside job.json that edit_document() may replace.
 _SIDE_DOCUMENTS = frozenset({"discovery.json"})
 
@@ -138,11 +141,17 @@ def worker_status(lease: Lease | None) -> str:
     return "unverifiable" if pid_alive(lease.worker_pid) else "gone"
 
 
+TransitionListener = Callable[[Job], None]
+
+
 class JobStore:
     def __init__(self, runtime_dir: Path, lock_timeout: float = 10.0) -> None:
         self.runtime_dir = runtime_dir
         self.jobs_dir = runtime_dir / "jobs"
         self.lock_timeout = lock_timeout
+        # Called with the job after every committed transition, outside the state lock (e.g. the
+        # GitHub Project Status sync). A listener's failure never undoes or blocks a transition.
+        self.listeners: list[TransitionListener] = []
 
     @classmethod
     def for_repo(cls, repo_root: Path, lock_timeout: float = 10.0) -> JobStore:
@@ -530,6 +539,31 @@ class JobStore:
         details = {"path": worktree.path, "branch": worktree.branch, "base_sha": worktree.base_sha}
         return self._mutate(job_id, apply, "worktree-prepared", details, None)
 
+    def assign_providers(self, job_id: str, builder: str, reviewer: str) -> Job:
+        """Record the human's explicit choice of builder and reviewer for an approved job.
+
+        Allowed only while no worker owns the job: after approval (``plan_approved``,
+        ``ready``) or while it waits for a human (``needs_human``), so a running builder can
+        never be swapped for another one. The names are checked against the real providers by
+        the caller (``forgeflow.pipeline``).
+        """
+        policy = Policy(builder=builder, reviewer=reviewer)
+        Policy.from_dict(policy.to_dict())  # name format
+
+        def apply(job: Job) -> None:
+            if job.state not in _ASSIGNABLE_STATES:
+                allowed = ", ".join(sorted(s.value for s in _ASSIGNABLE_STATES))
+                raise InvalidTransitionError(
+                    f"job {job_id} is {job.state.value}; providers can be chosen only in: {allowed}"
+                )
+            if job.lease is not None:
+                raise LeaseError(f"job {job_id} is owned by a worker; providers cannot change")
+            job.policy = policy
+
+        return self._mutate(
+            job_id, apply, "providers-assigned", {"builder": builder, "reviewer": reviewer}, None
+        )
+
     # --- lifecycle -------------------------------------------------------------------------
 
     def submit_plan(self, job_id: str, plan_path: str, *, reason: str = "") -> Job:
@@ -666,9 +700,20 @@ class JobStore:
                 self._apply_side_effects(job, source, target, approval, observed)
                 job.state = target
 
-            return self._mutate_locked(
+            job = self._mutate_locked(
                 job_id, apply, f"transition:{target.value}", details, expected_revision
             )
+        self._notify(job)
+        return job
+
+    def _notify(self, job: Job) -> None:
+        for listener in list(self.listeners):
+            try:
+                listener(job)
+            except Exception as exc:  # a listener never undoes or blocks a committed transition
+                self._append_event(
+                    job, "listener-failed", None, {"listener": repr(listener), "error": str(exc)}
+                )
 
     def _require_transition(self, job: Job, target: JobState) -> None:
         if target not in TRANSITIONS[job.state]:
@@ -872,6 +917,11 @@ class JobStore:
             if target in WORKER_STATES:
                 job.attempts.resumes += 1
             job.interrupted_from = None
+        if source is S.NEEDS_HUMAN and target is S.READY:
+            # A human chose to continue an escalated job (with a reason): that decision grants a
+            # fresh, still bounded, rework budget. attempts.build keeps the total.
+            job.attempts.human_resumes += 1
+            job.attempts.rework = 0
         if observed is not None:
             job.github.pull_request = PullRequestLink(
                 number=observed.number,
@@ -983,16 +1033,28 @@ class JobStore:
     # --- evidence --------------------------------------------------------------------------
 
     def record_evidence(
-        self, job_id: str, kind: str, status: str, payload: dict[str, Any], *, mocked: bool
+        self,
+        job_id: str,
+        kind: str,
+        status: str,
+        payload: dict[str, Any],
+        *,
+        mocked: bool,
+        commit: str | None = None,
     ) -> Evidence:
-        """Record a provider result, review or other note. Check results come from run_checks."""
+        """Record a provider result, review or other note. Check results come from run_checks.
+
+        ``commit`` names the commit the evidence is about (the reviewed or committed one).
+        """
         if not _EVIDENCE_KIND.match(kind):
             raise ValidationError(f"invalid evidence kind {kind!r}")
         if kind == "checks":
             raise ValidationError(
                 "checks evidence is recorded only by run_checks(), which runs them"
             )
-        return self._record_evidence(job_id, kind, status, payload, mocked=mocked, commit=None)
+        if commit is not None and not re.fullmatch(r"[0-9a-f]{40}([0-9a-f]{24})?", commit):
+            raise ValidationError(f"{commit!r} is not a full commit id")
+        return self._record_evidence(job_id, kind, status, payload, mocked=mocked, commit=commit)
 
     def _record_evidence(
         self,
@@ -1045,12 +1107,15 @@ class JobStore:
         *,
         runner: Runner = run_command,
         timeout: float = 600.0,
+        names: Sequence[str] = (),
+        source: dict[str, Any] | None = None,
     ) -> Evidence:
         """Run the deterministic checks in the job's worktree and record what really happened.
 
         Only the lease holder may run them, only in VERIFYING, and only on a clean worktree.
         The evidence names the commit they ran on; it passes only if every command exited 0 and
-        the commands left that commit and a clean worktree behind.
+        the commands left that commit and a clean worktree behind. ``names`` label the commands
+        and ``source`` says where they were configured; both are recorded as given.
         """
         if not commands or any(not argv for argv in commands):
             raise ValidationError("at least one non-empty check command is required")
@@ -1065,18 +1130,22 @@ class JobStore:
         build_round = job.attempts.build
 
         results: list[dict[str, Any]] = []
-        for argv in commands:
+        for i, argv in enumerate(commands):
+            label = {"name": names[i]} if i < len(names) else {}
+            started = time.monotonic()
             try:
                 result = runner(list(argv), cwd=worktree, timeout=timeout)
             except ForgeFlowError as exc:  # e.g. the tool is not installed
-                results.append({"argv": list(argv), "ok": False, "error": str(exc)})
+                results.append({**label, "argv": list(argv), "ok": False, "error": str(exc)})
                 continue
             results.append(
                 {
+                    **label,
                     "argv": list(argv),
                     "ok": result.ok,
                     "returncode": result.returncode,
                     "timed_out": result.timed_out,
+                    "seconds": round(time.monotonic() - started, 1),
                     "stdout_tail": redact_credentials(result.stdout[-_OUTPUT_TAIL:]),
                     "stderr_tail": redact_credentials(result.stderr[-_OUTPUT_TAIL:]),
                 }
@@ -1087,9 +1156,11 @@ class JobStore:
         passed = unchanged and all(r["ok"] for r in results)
         payload = {
             "commit": commit,
+            "build_round": build_round,
             "commands": results,
             "worktree_unchanged": unchanged,
             "changed_paths": dirty_after[:50],
+            "source": source or {},
         }
 
         def still_owned(current: Job) -> None:
@@ -1146,11 +1217,16 @@ class JobStore:
                 if job.state not in _LEASE_START_STATES:
                     raise LeaseError(f"a worker cannot take over a job in {job.state.value}")
                 resume_target = job.interrupted_from if job.state is S.INTERRUPTED else None
-                expected_role = "reviewer" if resume_target is S.REVIEWING else "builder"
+                # The job is owned by its builder's orchestrator throughout; the reviewer is a
+                # read-only subprocess of it. A review interrupted mid-way may also be resumed
+                # by a reviewer lease (Checkpoint A), which can never enter BUILDING.
+                expected_role = (
+                    role if resume_target is S.REVIEWING and role == "reviewer" else "builder"
+                )
                 expected_provider = (
                     job.policy.reviewer if expected_role == "reviewer" else job.policy.builder
                 )
-                if expected_provider in (None, UNASSIGNED_PROVIDER):
+                if job.policy.builder == UNASSIGNED_PROVIDER or expected_provider is None:
                     raise LeaseError(
                         f"job {job_id} has no {expected_role} assigned yet; nothing can run it"
                     )

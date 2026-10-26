@@ -7,6 +7,7 @@ import os
 import shutil
 import stat
 import subprocess
+import sys
 import tempfile
 import unittest
 from collections.abc import Callable, Mapping, Sequence
@@ -30,6 +31,7 @@ from forgeflow.proc import DEFAULT_TIMEOUT, CommandResult
 from forgeflow.store import JobStore
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+FAKE_CLI = PROJECT_ROOT / "tests" / "helpers" / "fake_cli.py"
 
 
 def _on_rm_error(func: Callable[..., object], path: str, _exc: BaseException) -> None:
@@ -152,6 +154,19 @@ class GitRepoTestCase(unittest.TestCase):
             )
 
         return self.store.update(job_id, apply, event="pr-linked")
+
+    def fake_cli(self, cli: str, steps: dict[str, Any] | list[dict[str, Any]]) -> list[str]:
+        """A provider ``command`` running tests/helpers/fake_cli.py; its results are mocked."""
+        self._fake_clis = getattr(self, "_fake_clis", 0) + 1
+        script = self.tmp / f"fake-{cli}-{self._fake_clis}.json"
+        script.write_text(json.dumps(steps), encoding="utf-8")
+        return [sys.executable, str(FAKE_CLI), cli, str(script)]
+
+    def fake_cli_log(self, command: list[str]) -> list[dict[str, Any]]:
+        log = Path(command[3]).with_suffix(".log")
+        if not log.exists():
+            return []
+        return [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
 
     def tamper(self, job_id: str, edit: Callable[[dict[str, Any]], None]) -> None:
         """Edit job.json behind the store's back, as a buggy or hostile local process could."""

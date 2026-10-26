@@ -189,7 +189,10 @@ class SkillAdapterTests(unittest.TestCase):
                 self.assertRegex(front, r"(?m)^description:\s*\S")
 
     def test_adapters_only_run_implemented_commands(self) -> None:
-        implemented = {"doctor", "status", "init", "skills", "idea", "design", "handoff"}
+        implemented = {
+            "doctor", "status", "init", "skills", "idea", "design", "handoff",
+            "run", "resume", "rework", "sync",
+        }  # fmt: skip
         for path in self.ADAPTERS:
             with self.subTest(str(path)):
                 text = path.read_text(encoding="utf-8")

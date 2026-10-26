@@ -23,7 +23,7 @@ import signal
 import socket
 import subprocess
 import sys
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from types import TracebackType
@@ -89,6 +89,21 @@ def which(name: str) -> str | None:
     return shutil.which(name)
 
 
+class TrackedRunner(Protocol):
+    """A runner that reports the child's PID once it is contained, before it does any work."""
+
+    def __call__(
+        self,
+        argv: Sequence[str],
+        *,
+        cwd: Path | None = None,
+        timeout: float = DEFAULT_TIMEOUT,
+        input_text: str | None = None,
+        env: Mapping[str, str] | None = None,
+        on_start: Callable[[int], None] | None = None,
+    ) -> CommandResult: ...
+
+
 def run_command(
     argv: Sequence[str],
     *,
@@ -101,6 +116,25 @@ def run_command(
 
     Returns within roughly ``timeout + 2 * KILL_GRACE`` seconds, and no descendant of the command
     is left running afterwards (see the module notes for the POSIX limitation).
+    """
+    return run_tracked(argv, cwd=cwd, timeout=timeout, input_text=input_text, env=env)
+
+
+def run_tracked(
+    argv: Sequence[str],
+    *,
+    cwd: Path | None = None,
+    timeout: float = DEFAULT_TIMEOUT,
+    input_text: str | None = None,
+    env: Mapping[str, str] | None = None,
+    on_start: Callable[[int], None] | None = None,
+) -> CommandResult:
+    """``run_command`` that calls ``on_start(pid)`` once the child is inside its container.
+
+    Used for provider subprocesses, whose PID the job lease records so that no second builder
+    can start while one still runs. If ``on_start`` raises, the child is killed and the error
+    propagates. On Windows the child dies with this process (kill-on-close Job Object), so an
+    orchestrator that is killed takes its provider with it.
     """
     if not argv:
         raise ValueError("argv must not be empty")
@@ -130,6 +164,8 @@ def run_command(
         **popen_kwargs,  # type: ignore[call-overload]
     )
     with _ProcessTree(proc) as tree:
+        if on_start is not None:
+            on_start(proc.pid)  # an exception here leaves the with block, which kills the tree
         try:
             stdout, stderr = proc.communicate(input=input_text, timeout=timeout)
         except subprocess.TimeoutExpired:

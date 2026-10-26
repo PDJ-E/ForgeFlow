@@ -6,6 +6,11 @@ Code and Codex skill adapters, which call these commands.
 
 Checkpoint B adds the planning workflow: ``init``, ``skills``, ``idea``, ``design``, ``approve``
 and ``handoff``. None of them writes code, prepares a worktree or dispatches a builder.
+
+Checkpoint C adds execution of an approved job: ``run`` (build, checks, review, bounded rework,
+draft PR, Gate B), ``resume`` (the same after an interruption, with the same providers),
+``rework`` (another round on a delivered draft PR, at the owner's request) and ``sync``
+(record a merge GitHub reports, and bring the Project Status in line with the job).
 """
 
 from __future__ import annotations
@@ -16,7 +21,7 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
-from forgeflow import __version__, design, discovery, hostskills
+from forgeflow import __version__, board, design, discovery, hostskills, pipeline
 from forgeflow.approval import (
     ApprovalContext,
     ApprovalDeclinedError,
@@ -36,17 +41,16 @@ from forgeflow.errors import ForgeFlowError
 from forgeflow.github import GitHubClient
 from forgeflow.gitrepo import discover_identity, main_worktree_root
 from forgeflow.handoff import describe, handoff, issue_content
-from forgeflow.jobs import WORKER_STATES, Job, Repo
+from forgeflow.jobs import WORKER_STATES, Job, JobState, Repo
 from forgeflow.proc import hostname, pid_alive, run_command
+from forgeflow.providers import REAL_PROVIDERS
 from forgeflow.store import JobStore, worker_status
 
 NOT_YET = {
-    "run": "C",
-    "review": "C",
-    "rework": "C",
-    "resume": "C",
     "learn": "post-v0.1",
 }
+# `run`, `resume` and `rework` exit with this code when the job stopped for a human.
+EXIT_NEEDS_HUMAN = 4
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -139,6 +143,31 @@ def _parser() -> argparse.ArgumentParser:
     hand.add_argument("job_id")
     hand.add_argument("--issue", type=int, help="link this existing issue instead of a new one")
     hand.add_argument("--dry-run", action="store_true", help="show what would be published")
+
+    providers = sorted(REAL_PROVIDERS)
+    run = sub.add_parser(
+        "run", help="build an approved job, check, review and open a draft PR (Gate B)"
+    )
+    run.add_argument("job_id")
+    run.add_argument("--builder", choices=providers, help="the single writable builder")
+    run.add_argument("--reviewer", choices=providers, help="the read-only reviewer")
+    run.add_argument("--builder-model", help="model passed to the builder CLI (default: its own)")
+    run.add_argument("--reviewer-model", help="model passed to the reviewer CLI")
+    run.add_argument(
+        "--timeout", type=int, default=1800, help="seconds per provider run (default 1800)"
+    )
+    run.add_argument("--reason", default="", help="why a job that waits for a human may continue")
+    resume = sub.add_parser("resume", help="continue an interrupted job with the same providers")
+    resume.add_argument("job_id")
+    resume.add_argument("--reason", default="", help="why a job that waits for a human may go on")
+    resume.add_argument("--timeout", type=int, default=1800)
+    rework = sub.add_parser("rework", help="another round on a delivered draft PR (owner request)")
+    rework.add_argument("job_id")
+    rework.add_argument("--reason", required=True, help="what should change")
+    sync = sub.add_parser(
+        "sync", help="record a merge GitHub reports and sync the Project Status (idempotent)"
+    )
+    sync.add_argument("job_id")
 
     for name, checkpoint in NOT_YET.items():
         sub.add_parser(name, help=f"not implemented yet (Checkpoint {checkpoint})")
@@ -309,6 +338,21 @@ def _summary_row(job: Job) -> dict[str, object]:
     }
 
 
+def _latest_evidence_lines(job: Job) -> list[str]:
+    lines = []
+    for kind in ("build-commit", "checks", "review"):
+        found = [e for e in job.evidence if e.kind == kind]
+        if found:
+            e = found[-1]
+            commit = f" on {e.commit[:12]}" if e.commit else ""
+            real = "mocked" if e.mocked else "real"
+            lines.append(
+                f"    latest {kind:<12} {e.status}{commit}, round {e.build_round}, {real} "
+                f"({e.path})"
+            )
+    return lines
+
+
 def _format_job(job: Job, recent: list[dict[str, object]]) -> str:
     gh = job.github
     approval = job.plan.approval
@@ -353,11 +397,20 @@ def _format_job(job: Job, recent: list[dict[str, object]]) -> str:
             or gh.project_lookup
         ),
         f"  pull request   {gh.pull_request.url if gh.pull_request else '-'}",
+        "  board          "
+        + (
+            f"Status {gh.board.status or '-'} for state {gh.board.state} at {gh.board.synced_at}"
+            + (f" (last sync failed: {gh.board.error})" if gh.board.error else "")
+            if gh.board
+            else "-"
+        ),
         f"  attempts       build {job.attempts.build}, rework {job.attempts.rework}/"
-        f"{job.attempts.max_rework}, resumes {job.attempts.resumes}",
+        f"{job.attempts.max_rework}, resumes {job.attempts.resumes}"
+        + (f", human continues {job.attempts.human_resumes}" if job.attempts.human_resumes else ""),
         f"  worker         {_lease_state(job)}",
         f"  evidence       {len(job.evidence)} record(s)"
         + (f", {sum(e.mocked for e in job.evidence)} mocked" if job.evidence else ""),
+        *_latest_evidence_lines(job),
         f"  created        {job.created_at}",
         f"  updated        {job.updated_at} (revision {job.revision})",
     ]
@@ -598,9 +651,112 @@ def _run_handoff(
         f"Project #{result.item.project_number} {result.item.project_title}: item "
         f"{result.item.item_id}, Status {result.item.status or '(none)'}\n"
         f"Job {result.job.label} stays {result.job.state.value}: no worktree, branch or builder "
-        "(Checkpoint C prepares and dispatches the work)."
+        "yet. Start it with: forgeflow run "
+        f"{result.job.ref or result.job.job_id} --builder claude|codex --reviewer claude|codex"
     )
     return 0
+
+
+# --- Checkpoint C: run, resume, rework, sync ---------------------------------------------------
+
+
+def _say(line: str) -> None:
+    print(f"  {line}", flush=True)
+
+
+def _github(store: JobStore) -> tuple[GitHubClient, board.BoardListener | None]:
+    client = GitHubClient()
+    binding = load_binding(store.repo_root)
+    if binding is None:
+        print(
+            "  warning: no GitHub Project is bound (forgeflow init --project N); the Project "
+            "Status is not updated"
+        )
+        return client, None
+    return client, board.BoardListener(store, client, binding)
+
+
+def _outcome(job: Job, listener: board.BoardListener | None) -> int:
+    pr = job.github.pull_request
+    print(f"\n{job.label}: {job.state.value}")
+    if listener is not None:
+        status = job.github.board.status if job.github.board else None
+        print(f"  Project Status: {status or '(unknown)'}")
+        for error in dict.fromkeys(listener.errors):
+            print(f"  warning: Project Status not updated: {error}")
+    if job.state is JobState.AWAITING_MERGE_APPROVAL and pr is not None:
+        print(
+            f"  Draft PR {pr.url} carries the validated commit.\n"
+            "  Gate B: review and merge it yourself on GitHub (ForgeFlow never merges), then "
+            f"run: forgeflow sync {job.ref or job.job_id}"
+        )
+        return 0
+    if job.state is JobState.NEEDS_HUMAN:
+        print(
+            "  Inspect the job (forgeflow status "
+            f"{job.ref or job.job_id}) and its worktree. To continue: forgeflow run "
+            f'{job.ref or job.job_id} --reason "..." [--builder X --reviewer Y]'
+        )
+        return EXIT_NEEDS_HUMAN
+    return 0
+
+
+def _run(start: Path, args: argparse.Namespace) -> int:
+    store = _store(start)
+    client, listener = _github(store)
+    options = pipeline.RunOptions(
+        builder=getattr(args, "builder", None),
+        reviewer=getattr(args, "reviewer", None),
+        reason=args.reason,
+        builder_model=getattr(args, "builder_model", None),
+        reviewer_model=getattr(args, "reviewer_model", None),
+        timeout_seconds=args.timeout,
+    )
+    if args.command == "resume" and store.load(args.job_id).state is JobState.PLAN_APPROVED:
+        print("forgeflow: nothing to resume; start the job with forgeflow run", file=sys.stderr)
+        return 1
+    job = pipeline.run_job(store, args.job_id, options, github=client, board=listener, report=_say)
+    return _outcome(job, listener)
+
+
+def _rework(start: Path, args: argparse.Namespace) -> int:
+    store = _store(start)
+    client, listener = _github(store)
+    job = pipeline.request_rework(
+        store, args.job_id, args.reason, github=client, board=listener, report=_say
+    )
+    return _outcome(job, listener)
+
+
+def _sync(start: Path, args: argparse.Namespace) -> int:
+    store = _store(start)
+    client, listener = _github(store)
+    job = store.load(args.job_id)
+    pr = job.github.pull_request
+    if listener is not None:
+        store.listeners.append(listener)
+    try:
+        if job.state is JobState.AWAITING_MERGE_APPROVAL and pr is not None and job.repo.slug:
+            observed = client.view_pull_request(job.repo.slug, pr.number)
+            if observed.merged:
+                job = store.record_merge(job.job_id, client)
+                print(f"  GitHub reports PR #{pr.number} merged with the validated commit.")
+            elif observed.state == "CLOSED":
+                print(
+                    f"  PR #{pr.number} was closed without a merge. Decide: forgeflow rework "
+                    f'{job.ref or job.job_id} --reason "..." (after reopening it), or cancel.'
+                )
+            else:
+                print(f"  PR #{pr.number} is open; it waits for the owner's merge (Gate B).")
+        elif listener is not None:
+            listener(job)
+    finally:
+        if listener is not None:
+            store.listeners.remove(listener)
+    job = store.load(job.job_id)
+    if listener is not None and listener.last is not None:
+        print(f"  {listener.last.describe()}")
+    return _outcome(job, listener)
 
 
 def _plan_line(job: Job) -> str:
@@ -622,4 +778,8 @@ _HANDLERS = {
     "design": _design,
     "approve": _approve,
     "handoff": _handoff,
+    "run": _run,
+    "resume": _run,
+    "rework": _rework,
+    "sync": _sync,
 }
