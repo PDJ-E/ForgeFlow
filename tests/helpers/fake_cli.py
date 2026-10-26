@@ -12,7 +12,11 @@ consumed when used, and the last one repeats. A step may contain:
 * ``writes``: {relative path: content} written in the working directory (Codex: ``-C``);
 * ``result``: the builder's final message; ``review``: the reviewer's structured answer;
 * ``sleep``: seconds to wait after writing, before answering (interruption tests);
-* ``exit``, ``stderr``, ``is_error``: failure modes; ``sandbox_refusal``: Codex's message.
+* ``exit``, ``stderr``, ``is_error``: failure modes; ``sandbox_refusal``: Codex's message;
+* ``cannot_read``: a reviewer that answers but never read the snapshot (no token returned).
+
+A reviewer step's answer gets ``snapshot_token`` (read from the snapshot's token file, as a
+reviewer with real file access would) and ``inspection_complete: true`` unless it sets them.
 
 Every invocation appends a line to ``<script>.log``: its pid, cwd, argv and the prompt,
 and "start"/"end" markers, so tests can prove what ran, where, and that no two overlapped.
@@ -65,7 +69,14 @@ def main() -> int:
     time.sleep(float(str(step.get("sleep", 0))))  # after the writes: partial work stays behind
     if step.get("stderr"):
         sys.stderr.write(str(step["stderr"]) + "\n")
-    review = step.get("review")
+    review: Any = step.get("review")
+    if isinstance(review, dict):
+        # Like a real reviewer with file access, read the token ForgeFlow put in the snapshot;
+        # "cannot_read" is the live failure: valid JSON, but the files were never readable.
+        token_file = workdir / ".forgeflow-review-token"
+        readable = token_file.exists() and not step.get("cannot_read")
+        token = token_file.read_text(encoding="utf-8").strip() if readable else ""
+        review = {"snapshot_token": token, "inspection_complete": True, **review}
     result = str(step.get("result", "done"))
     if cli == "claude":
         output = {

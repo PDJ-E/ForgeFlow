@@ -10,6 +10,7 @@ in test_delivery with real commits and checks.
 
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 import unittest
@@ -175,6 +176,42 @@ class SafetyTests(PipelineTestCase):
         self.assertEqual(job.state, S.NEEDS_HUMAN)
         self.assertNotIn("approve", [e.status for e in job.evidence if e.kind == "review"])
         self.assertIn("Nothing was approved", " ".join(self.lines))
+
+    def test_an_approval_without_snapshot_access_is_not_an_approval(self) -> None:
+        """Regression (live run 2026-10-26): Codex returned valid "approve" JSON although it
+        could not read the snapshot. Such a review is blocked: no approval, no rework."""
+        job = self.handed_off_job()
+        cases = [
+            {"review": APPROVE, "cannot_read": True},  # no token: never read the snapshot
+            {"review": {**APPROVE, "inspection_complete": False}},  # says it could not inspect
+        ]
+        for step in cases:
+            with self.subTest(step):
+                job = self.handed_off_job()
+                factory, builder, reviewer = self.providers(HELLO, step)
+                job = self.run_pipeline(job.job_id, factory)
+                self.assertEqual(job.state, S.NEEDS_HUMAN)
+                reviews = [e for e in job.evidence if e.kind == "review"]
+                self.assertEqual([r.status for r in reviews], ["blocked"])
+                self.assertEqual(job.attempts.rework, 0, "an infrastructure problem is not rework")
+                builds = [r for r in self.fake_cli_log(builder) if r["event"] == "start"]
+                self.assertEqual(len(builds), 1)
+                self.assertEqual(self.world.pulls, {})
+                self.assertIn("Nothing was approved", " ".join(self.lines))
+                prompt = self.fake_cli_log(reviewer)[0]["prompt"]
+                self.assertIn(".forgeflow-review-token", prompt)
+                self.store.transition(job.job_id, S.CANCELLED, reason="next case")
+
+    def test_the_token_never_appears_in_the_prompt(self) -> None:
+        job = self.handed_off_job()
+        factory, _, reviewer = self.providers(HELLO, {"review": APPROVE})
+        job = self.run_pipeline(job.job_id, factory)
+        review = [e for e in job.evidence if e.kind == "review"][-1]
+        self.assertEqual(review.status, "approve")
+        payload = json.loads((self.store.job_dir(job.job_id) / review.path).read_text("utf-8"))
+        token = payload["payload"]["review"]["snapshot_token"]
+        self.assertRegex(token, r"^[0-9a-f]{32}$")
+        self.assertNotIn(token, self.fake_cli_log(reviewer)[0]["prompt"])
 
     def test_the_reviewer_cannot_touch_the_build(self) -> None:
         job = self.handed_off_job()

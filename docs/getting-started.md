@@ -168,7 +168,7 @@ You must name both. `run` first checks both providers (installed, logged in, the
 2. runs the builder there with the approved plan (Claude: file tools only, confined to the worktree, no commands, no MCP; Codex: its `workspace-write` sandbox);
 3. asks git what changed, refuses anything outside `allowed_paths` or inside `protected_paths` (left uncommitted for you), and commits the rest itself;
 4. runs your checks on that commit (**QA**); a failure goes back to the builder with the failing output;
-5. gives the reviewer a read-only snapshot of exactly that commit (**Review**); blocking or major findings go back to the builder, minor ones go into the PR;
+5. gives the reviewer a read-only snapshot of exactly that commit (**Review**); the reviewer must return a random token from a file in the snapshot, so a review that could not read the files is blocked, not approved; blocking or major findings go back to the builder, minor ones go into the PR;
 6. after at most **2** rework rounds without success, stops and asks you (**Blocked**);
 7. otherwise pushes `forge/<job-id>` (never forced, never to the base branch), opens one **draft** PR with the scope, changes, check results, review and limitations, checks that GitHub shows the validated commit as its head, and stops at **Gate B**.
 

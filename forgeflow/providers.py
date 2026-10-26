@@ -101,6 +101,8 @@ class ProviderTask:
     review_commit: str = ""  # reviewer: the commit under review
     review_diff: str = ""  # reviewer: the diff base..commit (possibly truncated)
     review_checks: str = ""  # reviewer: summary of the checks that ran on the commit
+    # reviewer: snapshot file whose (unprompted) content proves the snapshot was readable
+    review_token_file: str = ""
     model: str | None = None  # passed through to the CLI only when set
 
     def validate(self) -> None:
@@ -265,8 +267,11 @@ def interpret_review(provider: str, answer: Any) -> tuple[str, tuple[str, ...], 
     if not isinstance(answer, dict):
         raise ProviderError(f"{provider} reviewer did not return a JSON object")
     findings_raw = answer.get("findings")
-    if answer.get("verdict") not in ("approve", "request-changes") or not isinstance(
-        findings_raw, list
+    if (
+        answer.get("verdict") not in ("approve", "request-changes")
+        or not isinstance(findings_raw, list)
+        or not isinstance(answer.get("snapshot_token"), str)
+        or not isinstance(answer.get("inspection_complete"), bool)
     ):
         raise ProviderError(f"{provider} reviewer answer does not match the review schema")
     findings: list[str] = []
@@ -636,13 +641,13 @@ class CodexProvider(_CliProvider):
         if result.timed_out:
             return self._result(task, result, summary="timed out", usage=usage, notes=notes)
         failure = next((e for e in events if e.get("type") in ("turn.failed", "error")), None)
-        if refused and builder:
+        if refused:  # builder or reviewer: its work is incomplete, whatever it answered
             return self._result(
                 task,
                 result,
                 status="blocked",
-                summary="Codex's sandbox refused to run (it does not run unsandboxed); "
-                "see notes. Choose another builder or move the repository.",
+                summary="Codex's sandbox refused to run (it does not run unsandboxed); see "
+                f"notes. Choose another {task.role} or move the repository.",
                 usage=usage,
                 notes=notes,
             )

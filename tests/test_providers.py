@@ -24,6 +24,7 @@ from forgeflow.providers import (
     ProviderResult,
     ProviderTask,
     ProviderUnavailableError,
+    UsageReport,
     interpret_review,
     validate_policy,
 )
@@ -300,6 +301,29 @@ class ExecutionTests(unittest.TestCase):
         self.assertEqual(result.status, "blocked")
         self.assertTrue(any("refusing to run unsandboxed" in n for n in result.notes))
 
+    def test_a_sandbox_refusal_blocks_a_reviewer_too(self) -> None:
+        command = self.cli("codex", {"sandbox_refusal": True, "review": {"verdict": "approve",
+                                     "summary": "fine", "findings": []}})  # fmt: skip
+        task = self.task(role="reviewer", allowed_operations=("read",), review_commit="a" * 40)
+        result = self.execute(CodexProvider(command=command), task)
+        self.assertEqual((result.status, result.verdict), ("blocked", None))
+
+    def test_review_access_must_be_proven(self) -> None:
+        from forgeflow.dispatch import verify_review_access
+
+        def review(token: str, complete: bool) -> ProviderResult:
+            answer = {"verdict": "approve", "summary": "ok", "findings": [],
+                      "snapshot_token": token, "inspection_complete": complete}  # fmt: skip
+            return ProviderResult("codex", "reviewer", "succeeded", "ok", (), UsageReport(),
+                                  False, verdict="approve", review=answer)  # fmt: skip
+
+        self.assertEqual(verify_review_access(review("t0k", True), "t0k").verdict, "approve")
+        for bad in (review("", True), review("other", True), review("t0k", False)):
+            with self.subTest(bad.review):
+                checked = verify_review_access(bad, "t0k")
+                self.assertEqual((checked.status, checked.verdict), ("blocked", None))
+                self.assertIn("review incomplete", checked.summary)
+
     def test_a_provider_that_overruns_is_killed(self) -> None:
         command = self.cli("claude", {"sleep": 30})
         started = time.monotonic()
@@ -311,7 +335,13 @@ class ExecutionTests(unittest.TestCase):
         self.assertEqual(self.lease.pids[-1], None)
 
     def test_malformed_reviews_are_errors_not_approvals(self) -> None:
-        answers: list[Any] = [None, [], {"verdict": "lgtm", "findings": []}, {"verdict": "approve"}]
+        answers: list[Any] = [
+            None,
+            [],
+            {"verdict": "lgtm", "findings": []},
+            {"verdict": "approve"},
+            {"verdict": "approve", "summary": "", "findings": []},
+        ]  # no token
         for answer in answers:
             with self.subTest(answer), self.assertRaises(ProviderError):
                 interpret_review("x", answer)

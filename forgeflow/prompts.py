@@ -25,6 +25,10 @@ REVIEW_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
         "verdict": {"type": "string", "enum": ["approve", "request-changes"]},
+        # The exact content of the snapshot's token file (never in the prompt): proof of access.
+        "snapshot_token": {"type": "string"},
+        # False when the reviewer could not read files it needed; the review is then not used.
+        "inspection_complete": {"type": "boolean"},
         "summary": {"type": "string"},
         "findings": {
             "type": "array",
@@ -41,7 +45,7 @@ REVIEW_SCHEMA: dict[str, Any] = {
             },
         },
     },
-    "required": ["verdict", "summary", "findings"],
+    "required": ["verdict", "summary", "findings", "snapshot_token", "inspection_complete"],
     "additionalProperties": False,
 }
 
@@ -115,6 +119,12 @@ pull request, and "minor" for optional suggestions. Do not report style preferen
 
 Return verdict "approve" when there is no blocking or major finding, otherwise \
 "request-changes". Respond with JSON matching the required schema and nothing else.
+
+Before judging, read the file `{task.review_token_file}` at the root of this directory and put \
+its exact content in "snapshot_token". Its content is not given to you anywhere else. Set \
+"inspection_complete" to true only if you could read every file you needed; if reading files \
+failed or was refused, set it to false and say what failed in "summary". A review that does not \
+prove access to the snapshot is not used.
 
 ## Acceptance criteria
 

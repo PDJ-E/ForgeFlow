@@ -255,22 +255,9 @@ def run_reviewer(
     shown = diff[:MAX_REVIEW_DIFF] + (
         "\n... diff truncated; read the files in the snapshot ..." if truncated else ""
     )
-    remove_stale_snapshots(job.job_id)  # left behind by a review whose process was killed
-    snapshot = make_snapshot(worktree, head, job.job_id)
-    try:
-        review_task = replace(
-            task,
-            role="reviewer",
-            worktree_path=str(snapshot),
-            allowed_operations=("read",),
-            review_commit=head,
-            review_diff=shown,
-            review_checks=checks_summary,
-        )
-        review_task.validate()
-        result = provider.execute(review_task, lease)
-    finally:
-        _remove_tree(snapshot)
+    result = review_in_snapshot(
+        provider, lease, task, worktree, head, diff=shown, checks_summary=checks_summary
+    )
     if git_ok(worktree, "rev-parse", "HEAD", read_only=True) != head or porcelain_status(worktree):
         raise ProviderError("the build worktree changed during the review; refusing its result")
     payload: dict[str, Any] = {
@@ -288,6 +275,72 @@ def run_reviewer(
 
 
 _SNAPSHOT_PREFIX = "forgeflow-review-"
+# Written into every review snapshot with a fresh random value that is never in the prompt. The
+# reviewer must return it: proof that it really read files in the snapshot, not just the diff.
+REVIEW_TOKEN_FILE = ".forgeflow-review-token"  # noqa: S105 - a file name, not a secret
+
+
+def review_in_snapshot(
+    provider: Provider,
+    lease: LeaseHandle,
+    task: ProviderTask,
+    worktree: Path,
+    head: str,
+    *,
+    diff: str,
+    checks_summary: str,
+) -> ProviderResult:
+    """Run the reviewer on a fresh snapshot of ``head`` and verify it could read the snapshot.
+
+    A review whose ``snapshot_token`` is not the one written into the snapshot, or that says
+    ``inspection_complete: false``, is returned as ``blocked`` with no verdict: an
+    infrastructure problem for a human, never an approval and never a reason to rework.
+    """
+    remove_stale_snapshots(task.job_id)  # left behind by a review whose process was killed
+    snapshot = make_snapshot(worktree, head, task.job_id)
+    try:
+        token_file = snapshot / REVIEW_TOKEN_FILE
+        if token_file.exists():
+            raise ProviderError(f"the commit itself contains {REVIEW_TOKEN_FILE}; cannot review it")
+        token = secrets.token_hex(16)
+        token_file.write_text(token + "\n", encoding="utf-8")
+        review_task = replace(
+            task,
+            role="reviewer",
+            worktree_path=str(snapshot),
+            allowed_operations=("read",),
+            review_commit=head,
+            review_diff=diff,
+            review_checks=checks_summary,
+            review_token_file=REVIEW_TOKEN_FILE,
+        )
+        review_task.validate()
+        result = provider.execute(review_task, lease)
+    finally:
+        _remove_tree(snapshot)
+    return verify_review_access(result, token)
+
+
+def verify_review_access(result: ProviderResult, token: str) -> ProviderResult:
+    if result.status != "succeeded" or result.review is None:
+        return result
+    returned = str(result.review.get("snapshot_token", "")).strip()
+    complete = result.review.get("inspection_complete") is True
+    if returned == token and complete:
+        return result
+    why = (
+        "it did not return the snapshot token, so it did not read the snapshot"
+        if returned != token
+        else "it reported that it could not inspect the files it needed"
+    )
+    return replace(
+        result,
+        status="blocked",
+        verdict=None,
+        summary=f"review incomplete: {why}. Its answer is not used. Reviewer said: "
+        f"{result.summary[:300]}",
+        notes=(*result.notes, f"review-access: {why}"),
+    )
 
 
 def remove_stale_snapshots(job_id: str) -> None:
