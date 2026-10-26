@@ -1,7 +1,7 @@
 # ADR 0002 — Optional knowledge sources and Obsidian integration
 
-- **Status:** Accepted as a design direction; not implemented
-- **Date:** 2026-10-24
+- **Status:** Accepted as a design direction; not implemented (Checkpoint D)
+- **Date:** 2026-10-24 (pilot vault setup updated 2026-10-25; see [amendments](#amendments))
 - **Scope:** Knowledge Management for ForgeFlow, not ownership of a user's vault
 - **Related:** [Architecture](../architecture.md), [MVP scope](../mvp-scope.md), [ADR 0001](0001-github-projects-local-state.md)
 
@@ -76,3 +76,11 @@ ForgeFlow stays useful to developers with plain Markdown or Git and can adopt Ob
 ## Later validation
 
 In the temporary vault, verify scoped reads, search relevance, provenance, diff preview, safe approved write, stale-content conflict rejection, path escape rejection, MCP-off fallback and no change without explicit approval. Record which adapter supplies each guarantee.
+
+## Amendments
+
+**2026-10-25: pilot vault setup.** The decision is unchanged; this corrects how the pilot environment is described above.
+
+- The owner's notes now live in **one working vault** that holds several projects (ForgeFlow and Weather Station) as top-level folders, each with its own numbered subfolders. It replaces the example `Personal Knowledge/Projects/<project>/` layout in the context. ForgeFlow must not assume either layout; the project-to-root association stays explicit.
+- That vault contains real notes, so it is **not** the disposable test vault. The dummy-note sandbox from the original connectivity test sits inside it. Write tests for Checkpoint D and the Checkpoint E demonstration still need a separate disposable vault, or a root scoped to the sandbox folder only and enforced by the adapter.
+- Claude Code reaches the vault through the same `mcp-obsidian` bridge, installed as a desktop extension; Codex has its own `mcp-obsidian` entry. Each client stores its own copy of the Local REST API key. When the plugin regenerates its key, every client gets HTTP 401 until its server is restarted with the new key. A knowledge adapter must report that as an authentication blocker, not as an empty or missing vault.
