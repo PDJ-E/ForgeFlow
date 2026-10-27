@@ -19,7 +19,8 @@ class CodexIsolationTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory(prefix="forgeflow-isolation-")
         self.addCleanup(self.tmp.cleanup)
-        self.root = Path(self.tmp.name)
+        # Windows CI's TEMP uses an 8.3 alias (RUNNER~1); runtime guards resolve it.
+        self.root = Path(self.tmp.name).resolve()
         self.work = self.root / "work"
         self.work.mkdir()
         patch = mock.patch.dict(
