@@ -36,6 +36,7 @@ from forgeflow.config import (
     config_path,
     load_binding,
 )
+from forgeflow.dispatch import review_access_verified
 from forgeflow.environment import EnvironmentReport, inspect_environment, linked_projects
 from forgeflow.errors import ForgeFlowError
 from forgeflow.github import GitHubClient
@@ -281,7 +282,7 @@ def _status(start: Path, job_id: str | None, *, as_json: bool, events: int) -> i
                 )
             )
         else:
-            print(_format_job(job, recent))
+            print(_format_job(job, recent, store))
         return 0
 
     jobs, problems = store.list_jobs()
@@ -338,7 +339,7 @@ def _summary_row(job: Job) -> dict[str, object]:
     }
 
 
-def _latest_evidence_lines(job: Job) -> list[str]:
+def _latest_evidence_lines(job: Job, store: JobStore | None) -> list[str]:
     lines = []
     for kind in ("build-commit", "checks", "review"):
         found = [e for e in job.evidence if e.kind == kind]
@@ -346,6 +347,9 @@ def _latest_evidence_lines(job: Job) -> list[str]:
             e = found[-1]
             commit = f" on {e.commit[:12]}" if e.commit else ""
             real = "mocked" if e.mocked else "real"
+            if kind == "review" and store is not None:
+                access = "verified" if review_access_verified(store, job, e) else "NOT verified"
+                real += f", snapshot access {access}"
             lines.append(
                 f"    latest {kind:<12} {e.status}{commit}, round {e.build_round}, {real} "
                 f"({e.path})"
@@ -353,7 +357,7 @@ def _latest_evidence_lines(job: Job) -> list[str]:
     return lines
 
 
-def _format_job(job: Job, recent: list[dict[str, object]]) -> str:
+def _format_job(job: Job, recent: list[dict[str, object]], store: JobStore | None = None) -> str:
     gh = job.github
     approval = job.plan.approval
     lines = [
@@ -410,7 +414,7 @@ def _format_job(job: Job, recent: list[dict[str, object]]) -> str:
         f"  worker         {_lease_state(job)}",
         f"  evidence       {len(job.evidence)} record(s)"
         + (f", {sum(e.mocked for e in job.evidence)} mocked" if job.evidence else ""),
-        *_latest_evidence_lines(job),
+        *_latest_evidence_lines(job, store),
         f"  created        {job.created_at}",
         f"  updated        {job.updated_at} (revision {job.revision})",
     ]

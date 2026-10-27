@@ -26,7 +26,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from forgeflow import __version__, design, fsutil
-from forgeflow.dispatch import latest, passing_checks_for_round
+from forgeflow.dispatch import latest, passing_checks_for_round, verified_approval
 from forgeflow.errors import GitError, GitHubError, InvalidTransitionError
 from forgeflow.github import GitHubClient, PullRequestSummary
 from forgeflow.gitrepo import git, git_ok, porcelain_status
@@ -73,14 +73,12 @@ def deliver(
             "build is never pushed or delivered"
         )
     checks = passing_checks_for_round(job)
-    review = latest(job, "review")
-    if (
-        review is None
-        or review.build_round != job.attempts.build
-        or review.commit != checks.commit
-        or review.status != "approve"
-    ):
-        raise InvalidTransitionError("the validated commit has no approving review this round")
+    if verified_approval(store, job, checks.commit) is None:
+        raise InvalidTransitionError(
+            "the validated commit has no verified approving review this round (an approval "
+            "without ForgeFlow's record that the reviewer read the snapshot does not count); "
+            "nothing was pushed"
+        )
     if job.worktree is None or not job.repo.slug or job.github.issue is None:
         raise InvalidTransitionError("the job has no worktree, GitHub repository or issue")
     worktree = store.job_worktree(job)
@@ -287,6 +285,11 @@ def pr_body(store: JobStore, job: Job, head: str) -> str:
         "",
         f"Verdict: **{review.get('verdict', '?')}**. "
         + _private(str(review.get("summary") or ""), job).strip(),
+        "",
+        "Snapshot access: verified by ForgeFlow (the reviewer returned a token that exists only "
+        "in a file of the snapshot, never in its prompt)."
+        if (review.get("review_access") or {}).get("verified") is True
+        else "Snapshot access: **not verified**.",
         "",
         *([_private(f"- {f}", job) for f in findings] or ["- No findings."]),
         "",

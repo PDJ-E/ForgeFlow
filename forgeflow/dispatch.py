@@ -255,7 +255,7 @@ def run_reviewer(
     shown = diff[:MAX_REVIEW_DIFF] + (
         "\n... diff truncated; read the files in the snapshot ..." if truncated else ""
     )
-    result = review_in_snapshot(
+    result, verified = review_in_snapshot(
         provider, lease, task, worktree, head, diff=shown, checks_summary=checks_summary
     )
     if git_ok(worktree, "rev-parse", "HEAD", read_only=True) != head or porcelain_status(worktree):
@@ -266,6 +266,12 @@ def run_reviewer(
         "diff_sha256": hashlib.sha256(diff.encode("utf-8")).hexdigest(),
         "diff_truncated": truncated,
         "snapshot": "git archive of the commit in a temporary directory, removed afterwards",
+        # ForgeFlow's own finding, written last so nothing the provider returned can supply it.
+        "review_access": {
+            "version": REVIEW_ACCESS_VERSION,
+            "verified": verified,
+            "method": "snapshot-token",
+        },
     }
     status = result.verdict if result.status == "succeeded" and result.verdict else result.status
     evidence = store.record_evidence(
@@ -278,6 +284,58 @@ _SNAPSHOT_PREFIX = "forgeflow-review-"
 # Written into every review snapshot with a fresh random value that is never in the prompt. The
 # reviewer must return it: proof that it really read files in the snapshot, not just the diff.
 REVIEW_TOKEN_FILE = ".forgeflow-review-token"  # noqa: S105 - a file name, not a secret
+# Version of the "review_access" record ForgeFlow writes into review evidence. Evidence without
+# it (recorded before this check existed) or with another version counts as unverified.
+REVIEW_ACCESS_VERSION = 1
+
+
+def review_access_verified(store: JobStore, job: Job, evidence: Evidence) -> bool:
+    """True only if ForgeFlow itself recorded verified snapshot access for this review."""
+    data = _evidence_payload(store, job, evidence)
+    record = data.get("review_access")
+    return (
+        isinstance(record, dict)
+        and record.get("version") == REVIEW_ACCESS_VERSION
+        and record.get("verified") is True
+    )
+
+
+def verified_approval(store: JobStore, job: Job, commit: str | None) -> Evidence | None:
+    """The approval this round may rely on, or None.
+
+    The one rule for consuming a review, shared by resume (skip a review already done) and
+    delivery: the latest review of the current round, of exactly ``commit``, approving, not
+    mocked unless the caller accepts that elsewhere, and with ForgeFlow's own record that the
+    reviewer proved it read the snapshot. Anything else is unverified and needs a fresh review.
+    """
+    review = latest(job, "review")
+    if (
+        review is None
+        or commit is None
+        or review.build_round != job.attempts.build
+        or review.commit != commit
+        or review.status != "approve"
+        or not review_access_verified(store, job, review)
+    ):
+        return None
+    return review
+
+
+def _evidence_payload(store: JobStore, job: Job, evidence: Evidence) -> dict[str, Any]:
+    try:
+        data = fsutil.read_json(store.job_dir(job.job_id) / evidence.path)
+    except (OSError, ValueError):
+        return {}
+    payload = data.get("payload") if isinstance(data, dict) else None
+    return payload if isinstance(payload, dict) else {}
+
+
+def access_proven(result: ProviderResult, token: str) -> bool:
+    """The reviewer returned the snapshot's token and said its inspection was complete."""
+    if result.status != "succeeded" or result.review is None:
+        return False
+    returned = str(result.review.get("snapshot_token", "")).strip()
+    return returned == token and result.review.get("inspection_complete") is True
 
 
 def review_in_snapshot(
@@ -289,8 +347,9 @@ def review_in_snapshot(
     *,
     diff: str,
     checks_summary: str,
-) -> ProviderResult:
-    """Run the reviewer on a fresh snapshot of ``head`` and verify it could read the snapshot.
+) -> tuple[ProviderResult, bool]:
+    """Run the reviewer on a fresh snapshot of ``head``; return its result and whether
+    ForgeFlow verified that it read the snapshot.
 
     A review whose ``snapshot_token`` is not the one written into the snapshot, or that says
     ``inspection_complete: false``, is returned as ``blocked`` with no verdict: an
@@ -318,16 +377,15 @@ def review_in_snapshot(
         result = provider.execute(review_task, lease)
     finally:
         _remove_tree(snapshot)
-    return verify_review_access(result, token)
+    return verify_review_access(result, token), access_proven(result, token)
 
 
 def verify_review_access(result: ProviderResult, token: str) -> ProviderResult:
     if result.status != "succeeded" or result.review is None:
         return result
-    returned = str(result.review.get("snapshot_token", "")).strip()
-    complete = result.review.get("inspection_complete") is True
-    if returned == token and complete:
+    if access_proven(result, token):
         return result
+    returned = str(result.review.get("snapshot_token", "")).strip()
     why = (
         "it did not return the snapshot token, so it did not read the snapshot"
         if returned != token

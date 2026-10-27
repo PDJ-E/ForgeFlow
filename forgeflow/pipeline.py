@@ -39,7 +39,13 @@ from typing import Any
 
 from forgeflow import fsutil, repoconfig
 from forgeflow.board import BoardListener
-from forgeflow.dispatch import latest, passing_checks_for_round, run_builder, run_reviewer
+from forgeflow.dispatch import (
+    latest,
+    passing_checks_for_round,
+    run_builder,
+    run_reviewer,
+    verified_approval,
+)
 from forgeflow.errors import (
     DuplicateWorkerError,
     ForgeFlowError,
@@ -451,16 +457,14 @@ def _review(ctx: Context) -> str | None:
     if job.state is S.INTERRUPTED:
         job = store.transition(ctx.job_id, S.REVIEWING, lease_token=ctx.token)
     checks = passing_checks_for_round(job)
-    done = latest(job, "review")
-    if (
-        done is not None
-        and done.build_round == job.attempts.build
-        and done.commit == checks.commit
-        and done.status == "approve"
-    ):
-        ctx.report("this commit already has an approving review; not reviewing it again")
+    if verified_approval(store, job, checks.commit) is not None:
+        ctx.report("this commit already has a verified approving review; not reviewing it again")
         _deliver(ctx)
         return None
+    earlier = latest(job, "review")
+    if earlier is not None and earlier.status == "approve" and earlier.commit == checks.commit:
+        # E.g. recorded before reviews had to prove snapshot access: never reused, never altered.
+        ctx.report("the earlier approval of this commit is unverified; reviewing it again")
     commit = checks.commit[:12] if checks.commit else "?"
     ctx.report(f"round {job.attempts.build}: reviewing {commit} with {ctx.reviewer.name}")
     task = build_task(
