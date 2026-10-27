@@ -44,7 +44,17 @@ ForgeFlow never reads or prints their contents. It never attempts unattended log
 ## Checks and guarantees
 
 Before model execution, ForgeFlow checks the managed profile, known configuration
-sources, `codex mcp list --json`, `codex plugin list --json`, and `codex login status`.
+sources, `codex features list`, `codex mcp list --json`, `codex plugin list --json`,
+and `codex login status`. All managed Codex commands use `--disable plugins
+--disable remote_plugin --disable apps`. The feature probe must confirm all three
+are disabled; unknown, missing, enabled, or duplicate values block execution.
+
+This matters after authentication: Codex 0.164.0's plugin-list command can query the
+account's remote catalog and time out even when the isolated profile has no plugins.
+Disabling account-backed discovery avoids that lookup and prevents remote plugins
+or account apps from being exposed to managed runs. The isolated profile remains
+the primary configuration boundary; these switches supplement it rather than
+disabling individual personal MCP servers.
 Detection uses the managed profile as cwd; doctor and preflight inspect the selected
 repository, and execution repeats the checks in the actual builder worktree or
 reviewer snapshot. Missing CLI inventory support, failed/timed-out probes, unknown
@@ -87,7 +97,10 @@ concurrent modification by another process running as the same user. Cloud/manag
 policy and future Codex versions can change runtime behavior; only recognized empty
 inventory responses are accepted. No organization policies are disabled. An
 authenticated live builder/reviewer smoke test requires a human to log into this
-independent profile; automated tests use mocked subprocesses instead.
+independent profile; automated tests use mocked subprocesses instead. The doctor
+path was also verified against a real, independently authenticated Codex 0.164.0
+profile after the human completed login: authentication succeeded, all three
+features were disabled, and MCP/plugin inventories were empty. No model was invoked.
 
 Relevant upstream behavior: [configuration precedence](https://developers.openai.com/codex/config-basic),
 [credential storage](https://developers.openai.com/codex/config-reference), and

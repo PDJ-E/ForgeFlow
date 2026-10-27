@@ -8,6 +8,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Fixed
+
+- Codex detection no longer times out fetching the account's plugin catalog after
+  isolated login. Every managed probe and execution disables local plugins, remote
+  plugins and account apps, verifies their effective feature values, and still
+  requires empty MCP/plugin inventories. Verified with an authenticated Codex 0.164.0
+  profile through the actual doctor path, without new login or model calls.
+
 ### Security
 
 - ForgeFlow-managed Codex detection, preflight, builders and reviewers now use a

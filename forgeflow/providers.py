@@ -40,7 +40,12 @@ from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any
 
 from forgeflow import fsutil, prompts
-from forgeflow.codex_runtime import CodexAuthenticationError, CodexRuntime, CodexRuntimeError
+from forgeflow.codex_runtime import (
+    ISOLATION_ARGS,
+    CodexAuthenticationError,
+    CodexRuntime,
+    CodexRuntimeError,
+)
 from forgeflow.errors import LeaseError, ProviderError, ToolNotFoundError, ValidationError
 from forgeflow.jobs import Policy
 from forgeflow.proc import (
@@ -574,6 +579,9 @@ class CodexProvider(_CliProvider):
     # Messages with which Codex's sandbox refuses to run rather than run unsandboxed.
     _SANDBOX_REFUSALS = ("refusing to run unsandboxed", "UnsupportedOperation")
 
+    def _argv0(self) -> list[str]:
+        return [*super()._argv0(), *ISOLATION_ARGS]
+
     def detect(
         self,
         runner: Runner = run_command,
@@ -587,20 +595,20 @@ class CodexProvider(_CliProvider):
         try:
             runtime = CodexRuntime.prepare(workdir)
             caps.notes.append(f"isolated CODEX_HOME: {runtime.home}")
-            version = _safe(
-                runner, [self.executable_name, "--version"], cwd=runtime.cwd, env=runtime.env
-            )
+            version = _safe(runner, [*self._argv0(), "--version"], cwd=runtime.cwd, env=runtime.env)
             if version and version.ok:
                 caps.version = _first_line(version.stdout)
             help_result = _safe(
-                runner, [self.executable_name, "exec", "--help"], cwd=runtime.cwd, env=runtime.env
+                runner, [*self._argv0(), "exec", "--help"], cwd=runtime.cwd, env=runtime.env
             )
             if help_result and help_result.ok:
                 caps.features = _flags_in(help_result.stdout, self.feature_flags)
             runtime.verify(runner, self._argv0())
             caps.authenticated = True
             caps.auth_detail = "authenticated with the isolated Codex profile"
-            caps.notes.append("effective MCP and plugin inventories verified empty")
+            caps.notes.append(
+                "plugin/account features verified disabled; effective MCP/plugin inventories empty"
+            )
         except CodexAuthenticationError as exc:
             caps.authenticated = False
             caps.auth_detail = str(exc)
@@ -674,7 +682,8 @@ class CodexProvider(_CliProvider):
         usage = _codex_usage(events)
         notes = (
             "Codex configuration isolation verified before execution: independent CODEX_HOME; "
-            "empty MCP/plugin inventories. This is not operating-system isolation.",
+            "plugin/account features disabled; empty MCP/plugin inventories. "
+            "This is not operating-system isolation.",
             *_codex_notes(events),
         )
         refused = [

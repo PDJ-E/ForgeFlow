@@ -59,13 +59,21 @@ def main() -> int:
     cli, script, args = sys.argv[1], Path(sys.argv[2]), sys.argv[3:]
     # Independent mocked inventories/auth: probes must not consume build/review steps.
     if cli == "codex":
+        tail = list(args)
+        features = {"plugins": "true", "remote_plugin": "true", "apps": "true"}
+        while tail[:1] == ["--disable"]:
+            features[tail[1]] = "false"
+            tail = tail[2:]
+        if tail == ["features", "list"]:
+            print("\n".join(f"{key} stable {value}" for key, value in features.items()))
+            return 0
         probes = {
             ("mcp", "list", "--json"): "[]",
             ("plugin", "list", "--json"): '{"installed":[],"available":[]}',
             ("login", "status"): "Logged in using ChatGPT",
         }
-        if tuple(args) in probes:
-            print(probes[tuple(args)])
+        if tuple(tail) in probes:
+            print(probes[tuple(tail)])
             return 0
     prompt = sys.stdin.read()
     step = _step(script)

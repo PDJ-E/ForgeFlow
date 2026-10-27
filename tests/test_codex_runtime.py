@@ -48,16 +48,24 @@ class CodexIsolationTests(unittest.TestCase):
     def runner(self, argv: Any, **kwargs: Any) -> CommandResult:
         args = list(argv)
         self.calls.append((args, kwargs))
+        # Model the CLI's global feature switches before dispatching its subcommand.
+        effective = {"plugins": "true", "remote_plugin": "true", "apps": "true"}
+        tail = args[1:]
+        while tail[:1] == ["--disable"]:
+            effective[tail[1]] = "false"
+            tail = tail[2:]
         output, code = "", 0
-        if args[1:] == ["--version"]:
+        if tail == ["features", "list"]:
+            output = "\n".join(f"{key} stable {value}" for key, value in effective.items())
+        elif tail == ["--version"]:
             output = "codex-cli 0.164.0"
-        elif args[1:] == ["exec", "--help"]:
+        elif tail == ["exec", "--help"]:
             output = " ".join(CodexProvider.feature_flags)
-        elif args[1:] == ["login", "status"]:
+        elif tail == ["login", "status"]:
             code, output = self.auth
-        elif args[1:] == ["mcp", "list", "--json"]:
+        elif tail == ["mcp", "list", "--json"]:
             output = self.mcp
-        elif args[1:] == ["plugin", "list", "--json"]:
+        elif tail == ["plugin", "list", "--json"]:
             output = self.plugins
         elif "exec" in args:
             kwargs["on_start"](123)
@@ -76,6 +84,41 @@ class CodexIsolationTests(unittest.TestCase):
         else:
             self.fail(f"unexpected subprocess {args}")
         return CommandResult(tuple(args), code, output, "")
+
+    def test_authenticated_profile_does_not_query_remote_plugins(self) -> None:
+        def authenticated_cli(argv: Any, **kwargs: Any) -> CommandResult:
+            # Captures Codex 0.164.0's observed post-login catalog timeout unless
+            # remote_plugin is explicitly disabled, without contacting the account.
+            args = list(argv)
+            if "plugin" in args and "remote_plugin" not in args:
+                return CommandResult(tuple(args), None, "", "", timed_out=True)
+            return self.runner(argv, **kwargs)
+
+        with mock.patch("forgeflow.providers.which", return_value="codex"):
+            caps = CodexProvider().detect(authenticated_cli)
+        self.assertTrue(caps.available, caps.to_dict())
+        for argv, _ in self.calls:
+            self.assertEqual(
+                argv[1:7],
+                ["--disable", "plugins", "--disable", "remote_plugin", "--disable", "apps"],
+            )
+
+    def test_ineffective_feature_disables_block_before_inventory_or_execution(self) -> None:
+        def runner(argv: Any, **kwargs: Any) -> CommandResult:
+            if "features" in argv:
+                return CommandResult(
+                    tuple(argv),
+                    0,
+                    "plugins stable false\nremote_plugin stable true\napps stable false",
+                    "",
+                )
+            return self.runner(argv, **kwargs)
+
+        with self.assertRaisesRegex(ProviderUnavailableError, "remote_plugin"):
+            CodexProvider(runner=runner).execute(
+                _task(worktree_path=str(self.work)), cast(Any, StubLease("ff-20261024-abcdef"))
+            )
+        self.assertEqual(self.calls, [])
 
     def test_detection_uses_isolated_profile_without_personal_config_or_auth(self) -> None:
         personal = self.root / "personal"
@@ -145,6 +188,11 @@ class CodexIsolationTests(unittest.TestCase):
                 for _, kwargs in self.calls:
                     self.assertEqual(kwargs["cwd"], self.work)
                     self.assertEqual(kwargs["env"]["CODEX_HOME"], str(self.profile))
+                for argv, _ in self.calls:
+                    self.assertEqual(
+                        argv[1:7],
+                        ["--disable", "plugins", "--disable", "remote_plugin", "--disable", "apps"],
+                    )
                 args, kwargs = self.calls[-1]
                 self.assertEqual(
                     args[args.index("-s") + 1],
@@ -235,7 +283,7 @@ class CodexIsolationTests(unittest.TestCase):
         self.assertEqual(self.calls, [])
 
     def test_inventory_failure_timeout_or_unknown_auth_blocks_execution(self) -> None:
-        for failed in ("mcp", "plugin", "login"):
+        for failed in ("features", "mcp", "plugin", "login"):
             for timed_out in (False, True):
                 with self.subTest(failed=failed, timed_out=timed_out):
                     self.calls.clear()
@@ -243,7 +291,7 @@ class CodexIsolationTests(unittest.TestCase):
                     def runner(
                         argv: Any, failed: str = failed, timed_out: bool = timed_out, **kwargs: Any
                     ) -> CommandResult:
-                        if argv[1] == failed:
+                        if failed in argv:
                             return CommandResult(
                                 tuple(argv), 1, "secret-key", "secret-token", timed_out
                             )
@@ -327,7 +375,7 @@ class CodexIsolationTests(unittest.TestCase):
         self.auth = (0, "Logged in using ChatGPT")
 
         def runner(argv: Any, **kwargs: Any) -> CommandResult:
-            if argv[1] == "mcp":
+            if "mcp" in argv:
                 return CommandResult(tuple(argv), 0, "[]", "", timed_out=True)
             return self.runner(argv, **kwargs)
 
