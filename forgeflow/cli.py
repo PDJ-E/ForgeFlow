@@ -234,7 +234,11 @@ def _doctor(start: Path, *, as_json: bool, network: bool) -> int:
 
 
 def _format_report(report: EnvironmentReport) -> str:
-    lines = [f"ForgeFlow doctor {__version__}: read-only; nothing was installed or changed.", ""]
+    lines = [
+        f"ForgeFlow doctor {__version__}: inspection; no login or installation. "
+        "Codex may initialize its managed application-data profile.",
+        "",
+    ]
     width = max(len(c.name) for c in report.checks)
     for check in report.checks:
         tag = f"[{check.status}]".ljust(9)

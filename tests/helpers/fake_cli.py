@@ -57,10 +57,26 @@ def _option(args: list[str], *names: str) -> str | None:
 
 def main() -> int:
     cli, script, args = sys.argv[1], Path(sys.argv[2]), sys.argv[3:]
+    # Independent mocked inventories/auth: probes must not consume build/review steps.
+    if cli == "codex":
+        probes = {
+            ("mcp", "list", "--json"): "[]",
+            ("plugin", "list", "--json"): '{"installed":[],"available":[]}',
+            ("login", "status"): "Logged in using ChatGPT",
+        }
+        if tuple(args) in probes:
+            print(probes[tuple(args)])
+            return 0
     prompt = sys.stdin.read()
     step = _step(script)
     workdir = Path(_option(args, "-C", "--cd") or os.getcwd())
-    record = {"pid": os.getpid(), "cwd": str(workdir), "argv": args, "prompt": prompt}
+    record = {
+        "pid": os.getpid(),
+        "cwd": str(workdir),
+        "argv": args,
+        "prompt": prompt,
+        "codex_home": os.environ.get("CODEX_HOME"),
+    }
     _log(script, {**record, "event": "start"})
     for rel, content in dict(step.get("writes", {})).items():  # type: ignore[call-overload]
         target = workdir / rel

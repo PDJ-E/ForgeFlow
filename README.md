@@ -52,7 +52,7 @@ The user-facing name is **ForgeFlow**. Its short entry points are `/forge` for C
 
 | Operation | Status |
 | --- | --- |
-| `doctor`: environment, GitHub and provider inspection | implemented (read-only) |
+| `doctor`: environment, GitHub and provider inspection | implemented (may initialize the isolated Codex profile) |
 | `status`: local job state | implemented (read-only) |
 | `init`: setup check and GitHub Project binding | implemented |
 | `idea`: interactive discovery, durable outcomes | implemented |
