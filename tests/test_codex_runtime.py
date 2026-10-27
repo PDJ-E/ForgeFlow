@@ -103,6 +103,121 @@ class CodexIsolationTests(unittest.TestCase):
                 ["--disable", "plugins", "--disable", "remote_plugin", "--disable", "apps"],
             )
 
+    def test_missing_worktree_probes_use_profile_then_switch_to_created_worktree(self) -> None:
+        target = self.work / "not-created" / "job"
+
+        def runner(argv: Any, **kwargs: Any) -> CommandResult:
+            if not kwargs["cwd"].is_dir():
+                raise NotADirectoryError(267, "The directory name is invalid")
+            return self.runner(argv, **kwargs)
+
+        with mock.patch("forgeflow.providers.which", return_value="codex"):
+            caps = CodexProvider().detect(runner, workdir=target)
+            self.assertTrue(caps.available, caps.to_dict())
+            self.assertFalse(target.exists())
+            self.assertTrue(all(kw["cwd"] == self.profile for _, kw in self.calls))
+            self.calls.clear()
+            target.mkdir(parents=True)
+            caps = CodexProvider().detect(runner, workdir=target)
+            self.assertTrue(caps.available, caps.to_dict())
+            self.assertTrue(all(kw["cwd"] == target for _, kw in self.calls))
+
+    def test_existing_non_directory_target_is_rejected_before_probes(self) -> None:
+        target = self.work / "file"
+        target.write_text("keep me")
+        with mock.patch("forgeflow.providers.which", return_value="codex"):
+            caps = CodexProvider().detect(self.runner, workdir=target)
+        self.assertFalse(caps.available)
+        self.assertIn("not a directory", caps.isolation_error)
+        self.assertIn(str(target), caps.isolation_error)
+        self.assertEqual(self.calls, [])
+        self.assertEqual(target.read_text(), "keep me")
+
+    def test_missing_target_still_checks_ancestor_configuration(self) -> None:
+        config = self.work / ".codex/config.toml"
+        config.parent.mkdir()
+        config.write_text("unsafe")
+        with mock.patch("forgeflow.providers.which", return_value="codex"):
+            caps = CodexProvider().detect(self.runner, workdir=self.work / "future/job")
+        self.assertFalse(caps.available)
+        self.assertIn(str(config), caps.isolation_error)
+        self.assertEqual(self.calls, [])
+
+    def test_missing_target_also_checks_probe_directory_ancestors(self) -> None:
+        config = self.root / "data/.codex/config.toml"
+        config.parent.mkdir(parents=True)
+        config.write_text("unsafe")
+        with mock.patch("forgeflow.providers.which", return_value="codex"):
+            caps = CodexProvider().detect(self.runner, workdir=self.work / "future/job")
+        self.assertFalse(caps.available)
+        self.assertIn(str(config), caps.isolation_error)
+        self.assertEqual(self.calls, [])
+
+    def test_detection_subprocess_os_errors_are_actionable(self) -> None:
+        for phase in ("--version", "--help", "features", "mcp", "plugin", "login"):
+            with self.subTest(phase=phase):
+
+                def runner(argv: Any, phase: str = phase, **kwargs: Any) -> CommandResult:
+                    if phase in argv:
+                        raise PermissionError("sensitive subprocess detail")
+                    return self.runner(argv, **kwargs)
+
+                with mock.patch("forgeflow.providers.which", return_value="codex"):
+                    caps = CodexProvider().detect(runner, workdir=self.work)
+                self.assertFalse(caps.available)
+                self.assertIn("CLI", caps.isolation_error)
+                self.assertIn("permissions", caps.isolation_error)
+                self.assertNotIn("sensitive", caps.isolation_error)
+
+    def test_missing_target_under_windows_temp_is_still_refused(self) -> None:
+        target = self.work / "future/job"
+        provider = CodexProvider()
+        with (
+            mock.patch("forgeflow.providers.sys.platform", "win32"),
+            mock.patch("forgeflow.providers.tempfile.gettempdir", return_value=str(self.work)),
+            mock.patch("forgeflow.providers.which", return_value="codex"),
+            mock.patch.object(
+                provider,
+                "_detect_for_workdir",
+                side_effect=lambda workdir: provider.detect(self.runner, workdir=workdir),
+            ),
+        ):
+            with self.assertRaisesRegex(ProviderUnavailableError, "%TEMP%"):
+                provider.preflight("builder", target)
+        self.assertFalse(target.exists())
+        self.assertTrue(self.calls)
+        self.assertTrue(all(kw["cwd"] == self.profile for _, kw in self.calls))
+
+    def test_inaccessible_target_fails_closed_before_probes(self) -> None:
+        original_stat = Path.stat
+
+        def stat(path: Path, **kwargs: Any) -> os.stat_result:
+            if path == self.work:
+                raise PermissionError("cannot inspect target")
+            return original_stat(path, **kwargs)
+
+        with (
+            mock.patch.object(Path, "stat", stat),
+            mock.patch("forgeflow.providers.which", return_value="codex"),
+        ):
+            caps = CodexProvider().detect(self.runner, workdir=self.work)
+        self.assertFalse(caps.available)
+        self.assertIn("target", caps.isolation_error)
+        self.assertIn("permissions", caps.isolation_error)
+        self.assertEqual(self.calls, [])
+
+    def test_execution_subprocess_failure_is_actionable(self) -> None:
+        def runner(argv: Any, **kwargs: Any) -> CommandResult:
+            if "exec" in argv:
+                raise PermissionError("sensitive subprocess detail")
+            return self.runner(argv, **kwargs)
+
+        with self.assertRaisesRegex(ProviderUnavailableError, "permissions") as error:
+            CodexProvider(runner=runner).execute(
+                _task(worktree_path=str(self.work)), cast(Any, StubLease("ff-20261024-abcdef"))
+            )
+        self.assertNotIn("sensitive", str(error.exception))
+
     def test_ineffective_feature_disables_block_before_inventory_or_execution(self) -> None:
         def runner(argv: Any, **kwargs: Any) -> CommandResult:
             if "features" in argv:
