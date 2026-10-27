@@ -23,6 +23,15 @@ _CONFIG = 'cli_auth_credentials_store = "file"\n'
 # Apply these global switches to probes and execution, then check their effective values.
 DISABLED_FEATURES = ("plugins", "remote_plugin", "apps")
 ISOLATION_ARGS = tuple(arg for feature in DISABLED_FEATURES for arg in ("--disable", feature))
+# Native Windows needs an explicit sandbox backend; without it Codex can fall back to a
+# read-only session even with --sandbox workspace-write. Passed per process, never persisted.
+WINDOWS_SANDBOX_ARGS = ("-c", 'windows.sandbox="unelevated"')
+
+
+def sandbox_args() -> tuple[str, ...]:
+    return WINDOWS_SANDBOX_ARGS if sys.platform == "win32" else ()
+
+
 _LOCAL_SOURCES = (
     ".codex/config.toml",
     ".codex/hooks.json",

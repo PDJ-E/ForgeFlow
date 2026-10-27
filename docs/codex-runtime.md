@@ -81,6 +81,24 @@ process-tree cleanup, lease/PID tracking and review access verification still ap
 New execution results record the successful isolation check in provider notes;
 historical evidence is not relabeled as isolated.
 
+## Windows sandbox backend
+
+On native Windows every managed Codex command (detection, verification probes and
+execution) also receives `-c 'windows.sandbox="unelevated"'`. Without an explicit
+backend Codex can start a read-only session even when ForgeFlow passes
+`--sandbox workspace-write`: the builder then cannot inspect sources, run commands or
+write, and changes nothing. Selecting the backend per process (not in the managed
+`config.toml`) needs no profile migration, leaves authentication alone and never touches
+the personal Codex configuration. Linux arguments are unchanged. Builders keep
+`workspace-write`, reviewers `read-only`, approvals stay `never`; plugin/MCP isolation
+is unchanged and `danger-full-access` is never used.
+
+Limits: the unelevated backend uses a restricted token rather than a dedicated sandbox
+user, so it is weaker than Codex's elevated backend. It limits writes to the workspace
+but is not a security boundary against hostile code: reads are not fully confined, and it
+does not hide the user's files or network. Worktrees under `%TEMP%` are still refused.
+If a builder reports it cannot read, run or write, the result notes point here.
+
 ## Limits
 
 This isolates **Codex configuration**, not the operating system. It does not hide

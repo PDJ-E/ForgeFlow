@@ -54,6 +54,8 @@ class CodexIsolationTests(unittest.TestCase):
         while tail[:1] == ["--disable"]:
             effective[tail[1]] = "false"
             tail = tail[2:]
+        if tail[:2] == ["-c", 'windows.sandbox="unelevated"']:
+            tail = tail[2:]
         output, code = "", 0
         if tail == ["features", "list"]:
             output = "\n".join(f"{key} stable {value}" for key, value in effective.items())

@@ -31,6 +31,7 @@ import fnmatch
 import hashlib
 import json
 import os
+import re
 import sys
 import tempfile
 from abc import ABC, abstractmethod
@@ -45,6 +46,7 @@ from forgeflow.codex_runtime import (
     CodexAuthenticationError,
     CodexRuntime,
     CodexRuntimeError,
+    sandbox_args,
 )
 from forgeflow.errors import LeaseError, ProviderError, ToolNotFoundError, ValidationError
 from forgeflow.jobs import Policy
@@ -580,7 +582,7 @@ class CodexProvider(_CliProvider):
     _SANDBOX_REFUSALS = ("refusing to run unsandboxed", "UnsupportedOperation")
 
     def _argv0(self) -> list[str]:
-        return [*super()._argv0(), *ISOLATION_ARGS]
+        return [*super()._argv0(), *ISOLATION_ARGS, *sandbox_args()]
 
     def detect(
         self,
@@ -708,6 +710,12 @@ class CodexProvider(_CliProvider):
         ]
         if refused:
             notes += (f"sandbox refusal: {refused[0][:300]}",)
+        elif builder and _SANDBOX_RESTRICTED.search(f"{message}\n{result.stderr}"):
+            notes += (
+                "Codex reported sandbox restrictions on reading, running or writing "
+                "(possibly a read-only session despite workspace-write); on Windows check "
+                "docs/codex-runtime.md (windows.sandbox) and that the worktree is outside %TEMP%",
+            )
         if result.timed_out:
             return self._result(task, result, summary="timed out", usage=usage, notes=notes)
         failure = next((e for e in events if e.get("type") in ("turn.failed", "error")), None)
@@ -778,6 +786,15 @@ def _codex_usage(events: list[dict[str, Any]]) -> UsageReport:
         source="codex exec --json turn.completed usage (input includes cached input)",
         raw=totals,
     )
+
+
+_SANDBOX_RESTRICTED = re.compile(
+    r"read-only (?:sandbox|session|filesystem|mode)"
+    r"|sandbox (?:restriction|policy|prevent|block|den)"
+    r"|(?:cannot|can't|unable to|not able to) (?:read|inspect|execute|run commands|write|modify)"
+    r"|blocked by (?:the )?sandbox",
+    re.IGNORECASE,
+)
 
 
 def _codex_notes(events: list[dict[str, Any]]) -> tuple[str, ...]:

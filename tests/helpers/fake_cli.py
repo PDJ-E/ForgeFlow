@@ -64,6 +64,8 @@ def main() -> int:
         while tail[:1] == ["--disable"]:
             features[tail[1]] = "false"
             tail = tail[2:]
+        if tail[:2] == ["-c", 'windows.sandbox="unelevated"']:
+            tail = tail[2:]
         if tail == ["features", "list"]:
             print("\n".join(f"{key} stable {value}" for key, value in features.items()))
             return 0

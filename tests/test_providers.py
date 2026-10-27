@@ -58,6 +58,8 @@ class ScriptedRunner:
         tail = list(argv[1:])
         while tail[:1] == ["--disable"]:
             tail = tail[2:]
+        if tail[:2] == ["-c", 'windows.sandbox="unelevated"']:
+            tail = tail[2:]
         code, out = self.responses.get(tuple(tail), (1, ""))
         return CommandResult(tuple(argv), code, out, "")
 
@@ -318,6 +320,43 @@ class ExecutionTests(unittest.TestCase):
         self.assertEqual(argv[argv.index("-s") + 1], "read-only")
         self.assertIn("--output-schema", argv)
         self.assertIn("--skip-git-repo-check", argv)
+
+    def test_codex_windows_sandbox_backend_is_passed_per_process(self) -> None:
+        wanted = ["-c", 'windows.sandbox="unelevated"']
+        for platform, expected in (("win32", True), ("linux", False)):
+            for role, sandbox in (("builder", "workspace-write"), ("reviewer", "read-only")):
+                with self.subTest(platform=platform, role=role):
+                    command = self.cli("codex", {"result": "ok"})
+                    provider = CodexProvider(command=command)
+                    task = self.task(
+                        role=role,
+                        allowed_operations=("read",) if role == "reviewer" else ("read", "write"),
+                    )
+                    with mock.patch("forgeflow.codex_runtime.sys.platform", platform):
+                        argv = provider.argv(task, Path("last.txt"), None)
+                        self.assertEqual(provider._argv0()[-2:] == wanted, expected)
+                    self.assertEqual(argv[argv.index("-s") + 1], sandbox)
+                    self.assertNotIn("danger-full-access", argv)
+                    self.assertEqual(
+                        any(a == 'windows.sandbox="unelevated"' for a in argv), expected
+                    )
+                    # global option precedes the subcommand, beside the plugin isolation flags
+                    if expected:
+                        self.assertLess(
+                            argv.index('windows.sandbox="unelevated"'), argv.index("exec")
+                        )
+                    self.assertIn("--disable", argv)
+
+    def test_codex_builder_reporting_sandbox_restrictions_gets_a_diagnostic(self) -> None:
+        command = self.cli(
+            "codex", {"result": "I cannot read files: the session is a read-only sandbox."}
+        )
+        result = self.execute(CodexProvider(command=command), self.task())
+        self.assertTrue(any("sandbox restrictions" in n for n in result.notes))
+        clean = self.execute(
+            CodexProvider(command=self.cli("codex", {"result": "built"})), self.task()
+        )
+        self.assertFalse(any("sandbox restrictions" in n for n in clean.notes))
 
     def test_codex_sandbox_refusal_is_reported_as_blocked(self) -> None:
         command = self.cli("codex", {"sandbox_refusal": True})
