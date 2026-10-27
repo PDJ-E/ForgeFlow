@@ -51,7 +51,7 @@ All the above documentation was introduced as the project's initial foundation i
   - The GitHub Project Status follows the job from one table (Ready, Building, QA, Review, Blocked, Done), synced after every transition and on `forgeflow sync`, idempotently; Done only after a merge GitHub confirms; issues are never closed by ForgeFlow.
   - `forgeflow resume` continues an interrupted job in the phase it was in without a duplicate provider, a rebuild of an approved commit or a second PR. On Windows a killed orchestrator takes its provider with it.
   - Verified live with the real CLIs (ADR 0005): Claude Code builder and Codex reviewer end to end on this repository, from an owner-approved plan to draft [PR #8](https://github.com/PDJ-E/ForgeFlow/pull/8) with green CI, unmerged (its Codex approval is recorded as unverified: the reviewer could not read the snapshot; snapshot access by both reviewers was re-verified live after the fix); Codex builder and Claude reviewer through the same provider classes on a disposable local repository.
-  - `/forge` and `$forge` can run `run`, `resume`, `rework` and `sync` when the user asks; [ADR 0005](docs/decisions/0005-build-review-and-delivery.md); ForgeFlow's own checks in `.forge/forgeflow.toml`; 77 new tests, including cross-process interruption tests.
+  - `/forge` and `$forge` can run `run`, `resume`, `rework` and `sync` when the user asks; [ADR 0005](docs/decisions/0005-build-review-and-delivery.md); ForgeFlow's own checks in `.forge/forgeflow.toml`; 79 new tests, including cross-process interruption tests.
 
 **No dashboard or knowledge adapter has been implemented yet.**
 
@@ -71,6 +71,7 @@ All the above documentation was introduced as the project's initial foundation i
 
 - Repositories nested deep on Windows no longer fail when a plan is submitted. Plan snapshots are now named `plans/v1.md`, `plans/v2.md`, … instead of by their 64-character hash. The full sha256 is still recorded and re-verified on every read, and existing hash-named snapshots keep working. Roots up to about 185 characters work without Windows long paths; deeper paths stop with a clear "path too long" error before anything is written.
 - `forgeflow handoff --dry-run` on a plan that was already handed off no longer claims it would create a new issue.
+- On Windows, reading a job record while another process replaces it (`forgeflow status` during a run, a second process polling) could fail with a sharing violation; reads now retry briefly, like the atomic replace itself.
 
 ### Security
 

@@ -108,7 +108,7 @@ The job schema is version 3: `github.delivery` (marker, branch, pushed commit, P
 
 ## Verification
 
-Automated (unittest, 328 tests, all in disposable local repositories; GitHub mocked by a stateful fake that reads PR heads from a real local bare repository):
+Automated (unittest, 330 tests, all in disposable local repositories; GitHub mocked by a stateful fake that reads PR heads from a real local bare repository):
 
 - `test_pipeline`: every phase, rework after failed checks and after review findings, the limit, a human continuing with a reason, scope violations kept uncommitted, an unavailable reviewer blocking before dispatch, a failing reviewer never counting as approval, a reviewer unable to touch the build, the Codex sandbox refusal, Gate A and the handoff first, explicit providers, missing checks, and that a simulated build is never pushed.
 - `test_delivery`: real commits, real checks and real pushes; one draft PR, idempotent after a crash right after creating it, no force push over a diverged branch, no second PR for a closed one, rework redelivered to the same PR as a draft, merge recorded only when GitHub reports it, the board at Review then Done.
