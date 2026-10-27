@@ -15,12 +15,15 @@ import subprocess
 import sys
 import unittest
 from pathlib import Path
+from typing import Any
 from unittest import mock
 
+from forgeflow.codex_runtime import ISOLATION_ARGS
 from forgeflow.errors import InvalidTransitionError, ValidationError
 from forgeflow.jobs import JobState
 from forgeflow.pipeline import acceptance_criteria, feedback_for
 from forgeflow.providers import ClaudeCodeProvider, CodexProvider, ProviderUnavailableError
+from forgeflow.worktree import WORKTREES_RELATIVE
 from tests.pipeline_support import APPROVE, PipelineTestCase, request_changes
 from tests.support import run_git
 
@@ -30,6 +33,71 @@ HI = {"writes": {"greet.txt": "hi\n"}, "result": "said hi"}
 
 
 class HappyPathTests(PipelineTestCase):
+    def test_first_run_preflights_codex_before_worktree_then_builds_and_claude_reviews(
+        self,
+    ) -> None:
+        job = self.handed_off_job()
+        target = (self.repo / WORKTREES_RELATIVE / job.job_id).resolve()
+        self.assertEqual(job.state, S.PLAN_APPROVED)
+        self.assertFalse(target.exists())
+        b = self.fake_cli("codex", HELLO)
+        r = self.fake_cli("claude", {"review": APPROVE})
+        # Keep real preflight/detection; substitute only the CLI, retaining mocked provenance.
+        builder = CodexProvider()
+        builder.real = False
+        made = {"codex": builder, "claude": ClaudeCodeProvider(command=r)}
+        starts: list[tuple[list[str], Path, bool]] = []
+        popen = subprocess.Popen
+
+        def launch(argv: list[str], **kwargs: Any) -> Any:
+            if b[2] in argv:
+                starts.append((argv, Path(kwargs["cwd"]), target.exists()))
+            return popen(argv, **kwargs)
+
+        # Test repositories live in TEMP; model a normal Windows checkout outside TEMP.
+        sandbox_temp = self.tmp / "sandbox-temp"
+        sandbox_temp.mkdir()
+        with (
+            mock.patch.object(builder, "_argv0", return_value=[*b, *ISOLATION_ARGS]),
+            mock.patch("forgeflow.providers.which", return_value=sys.executable),
+            mock.patch("forgeflow.providers.tempfile.gettempdir", return_value=str(sandbox_temp)),
+            mock.patch("forgeflow.proc.subprocess.Popen", side_effect=launch),
+        ):
+            result = self.run_pipeline(
+                job.job_id, made.__getitem__, builder="codex", reviewer="claude"
+            )
+        profile = (self.tmp / "appdata/forgeflow/codex").resolve()
+        self.assertEqual(len(starts), 11)  # six detection probes, four verification probes, exec
+        self.assertTrue(all(cwd == profile and not exists for _, cwd, exists in starts[:6]))
+        self.assertTrue(all(cwd == target and exists for _, cwd, exists in starts[6:]))
+        self.assertIn("--version", starts[0][0])
+        self.assertIn("login", starts[5][0])
+        self.assertIn("exec", starts[-1][0])
+        self.assertEqual((target / "greet.txt").read_text(), "hello\n")
+        self.assertEqual(
+            [(e.kind, e.status) for e in result.evidence],
+            [
+                ("provider-result", "succeeded"),
+                ("build-commit", "committed"),
+                ("checks", "passed"),
+                ("review", "approve"),
+            ],
+        )
+        self.assertTrue(self.fake_cli_log(r))
+        self.assertEqual(result.state, S.NEEDS_HUMAN)  # simulated models never deliver
+
+    def test_codex_invalid_target_fails_preflight_without_changing_approved_job(self) -> None:
+        job = self.handed_off_job()
+        target = self.repo / WORKTREES_RELATIVE / job.job_id
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("keep me")
+        made = {"codex": CodexProvider(), "claude": ClaudeCodeProvider()}
+        with mock.patch("forgeflow.providers.which", return_value=sys.executable):
+            with self.assertRaisesRegex(ProviderUnavailableError, "not a directory"):
+                self.run_pipeline(job.job_id, made.__getitem__, builder="codex", reviewer="claude")
+        self.assertEqual(self.store.load(job.job_id), job)
+        self.assertEqual(target.read_text(), "keep me")
+
     def test_a_simulated_build_runs_every_phase_and_is_never_delivered(self) -> None:
         job = self.handed_off_job()
         factory, builder, reviewer = self.providers(HELLO, {"review": APPROVE})

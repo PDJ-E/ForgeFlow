@@ -616,6 +616,13 @@ class CodexProvider(_CliProvider):
             caps.isolation_error = str(exc)
             caps.auth_detail = "isolated runtime unavailable"
             caps.notes.append(str(exc))
+        except OSError:
+            caps.isolation_error = (
+                "Codex detection could not run the CLI; check the executable and "
+                "managed-profile/target directory permissions, then retry"
+            )
+            caps.auth_detail = "isolated runtime unavailable"
+            caps.notes.append(caps.isolation_error)
         return caps
 
     def _detect_for_workdir(self, workdir: Path | None) -> ProviderCapabilities:
@@ -671,13 +678,21 @@ class CodexProvider(_CliProvider):
         builder = task.role == "builder"
         prompt = prompts.builder_prompt(task) if builder else prompts.reviewer_prompt(task)
         # Outside the worktree, so they never appear as changes of the build.
-        with tempfile.TemporaryDirectory(prefix="forgeflow-codex-") as scratch:
-            last = Path(scratch) / "last-message.txt"
-            schema = None if builder else Path(scratch) / "review-schema.json"
-            if schema is not None:
-                schema.write_text(json.dumps(prompts.REVIEW_SCHEMA), encoding="utf-8")
-            result = self._run(task, lease, self.argv(task, last, schema), prompt, env=runtime.env)
-            message = last.read_text(encoding="utf-8").strip() if last.is_file() else ""
+        try:
+            with tempfile.TemporaryDirectory(prefix="forgeflow-codex-") as scratch:
+                last = Path(scratch) / "last-message.txt"
+                schema = None if builder else Path(scratch) / "review-schema.json"
+                if schema is not None:
+                    schema.write_text(json.dumps(prompts.REVIEW_SCHEMA), encoding="utf-8")
+                result = self._run(
+                    task, lease, self.argv(task, last, schema), prompt, env=runtime.env
+                )
+                message = last.read_text(encoding="utf-8").strip() if last.is_file() else ""
+        except OSError as exc:
+            raise ProviderUnavailableError(
+                "Codex execution could not run the CLI or access its files; check the executable "
+                "and worktree/temporary directory permissions, then retry"
+            ) from exc
         events = _jsonl(result.stdout)
         usage = _codex_usage(events)
         notes = (

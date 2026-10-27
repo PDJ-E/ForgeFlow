@@ -67,6 +67,14 @@ def main() -> int:
         if tail == ["features", "list"]:
             print("\n".join(f"{key} stable {value}" for key, value in features.items()))
             return 0
+        if tail == ["--version"]:
+            print("codex-cli 0.164.0")
+            return 0
+        if tail == ["exec", "--help"]:
+            from forgeflow.providers import CodexProvider
+
+            print(" ".join(CodexProvider.feature_flags))
+            return 0
         probes = {
             ("mcp", "list", "--json"): "[]",
             ("plugin", "list", "--json"): '{"installed":[],"available":[]}',

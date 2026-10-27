@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import shlex
+import stat
 import sys
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -112,8 +113,20 @@ class CodexRuntime:
     def prepare(cls, workdir: Path | None = None) -> CodexRuntime:
         try:
             home = profile_path()
-            cwd = workdir.resolve() if workdir is not None else home
-            _guard_sources(cwd, home)
+            target = workdir.resolve() if workdir is not None else home
+            try:
+                target_stat = target.stat()
+            except FileNotFoundError:
+                # Preflight precedes worktree creation. Probe from the independent profile,
+                # but still inspect the intended worktree and every ancestor below.
+                cwd = home
+            else:
+                if not stat.S_ISDIR(target_stat.st_mode):
+                    raise CodexRuntimeError(f"Codex target {target} is not a directory")
+                cwd = target
+            _guard_sources(target, home)
+            if cwd != target:
+                _guard_sources(cwd, home)
             home.mkdir(parents=True, exist_ok=True, mode=0o700)
             config = home / "config.toml"
             if config.is_symlink() or config.is_junction():
@@ -165,8 +178,9 @@ class CodexRuntime:
             return cls(home, cwd, env)
         except (OSError, ValueError) as exc:
             raise CodexRuntimeError(
-                "Codex isolation could not prepare the managed profile; check application-data "
-                "directory permissions (no personal-profile fallback)"
+                "Codex isolation could not inspect the target or prepare the managed profile; "
+                "check target/ancestor and application-data directory permissions "
+                "(no personal-profile fallback)"
             ) from exc
 
     def login_instructions(self) -> str:
@@ -233,4 +247,7 @@ class CodexRuntime:
         try:
             return runner(argv, cwd=self.cwd, env=self.env, timeout=30)
         except (OSError, ToolNotFoundError) as exc:
-            raise CodexRuntimeError("Codex isolation verification could not run the CLI") from exc
+            raise CodexRuntimeError(
+                f"Codex isolation verification could not run the CLI in {self.cwd}; "
+                "check the executable and directory permissions, then retry"
+            ) from exc
