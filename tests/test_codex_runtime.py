@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -450,6 +452,95 @@ class CodexIsolationTests(unittest.TestCase):
         (self.root / ".git").mkdir()
         with self.assertRaisesRegex(codex_runtime.CodexRuntimeError, "outside any repository"):
             codex_runtime.CodexRuntime.prepare(self.work)
+
+    def populate_system_skills(self, home: Path) -> Path:
+        # Layout written by Codex's install_system_skills (codex-rs/skills/src/lib.rs).
+        system = home / "skills" / ".system"
+        for name in ("skill-creator", "imagegen"):
+            (system / name / "scripts").mkdir(parents=True)
+            (system / name / "SKILL.md").write_text("bundled\n")
+            (system / name / "scripts" / "run.py").write_text("pass\n")
+        (system / ".codex-system-skills.marker").write_text("10436c17968d409d\n")
+        return system
+
+    def test_codex_bundled_system_skills_keep_the_profile_valid(self) -> None:
+        fresh = codex_runtime.CodexRuntime.prepare(self.work)  # before Codex initializes skills
+        self.assertFalse((fresh.home / "skills").exists())
+        auth = fresh.home / "auth.json"
+        auth.write_text("secret-token")
+        system = self.populate_system_skills(fresh.home)
+        before = sorted(p.relative_to(fresh.home).as_posix() for p in fresh.home.rglob("*"))
+        for _ in range(3):  # repeated doctor runs
+            codex_runtime.CodexRuntime.prepare(self.work)
+        self.assertEqual(auth.read_text(), "secret-token")
+        self.assertEqual(
+            before, sorted(p.relative_to(fresh.home).as_posix() for p in fresh.home.rglob("*"))
+        )
+        # A Codex upgrade replaces .system wholesale with different content and marker.
+        shutil.rmtree(system)
+        (system / "new-skill").mkdir(parents=True)
+        (system / "new-skill" / "SKILL.md").write_text("v2\n")
+        (system / ".codex-system-skills.marker").write_text("ffffffffffffffff\n")
+        codex_runtime.CodexRuntime.prepare(self.work)
+        # An interrupted install (no marker yet) is Codex's to repair.
+        (system / ".codex-system-skills.marker").unlink()
+        codex_runtime.CodexRuntime.prepare(self.work)
+        with mock.patch("forgeflow.providers.which", return_value="codex"):
+            caps = CodexProvider().detect(self.runner)
+        self.assertTrue(caps.available, caps.to_dict())
+
+    def test_custom_or_unsafe_skills_are_rejected(self) -> None:
+        home = codex_runtime.CodexRuntime.prepare(self.work).home
+        system = self.populate_system_skills(home)
+        extra = system / "imagegen" / "copy.md"
+        cases: dict[str, tuple[Path, Any]] = {
+            "user skill beside .system": (home / "skills" / "mine", lambda p: p.mkdir()),
+            "loose file in skills": (home / "skills" / "x.md", lambda p: p.write_text("x")),
+            "file in .system": (system / "stray.md", lambda p: p.write_text("x")),
+            "hardlinked file": (extra, lambda p: os.link(system / "imagegen" / "SKILL.md", p)),
+        }
+        for label, (path, create) in cases.items():
+            with self.subTest(label):
+                create(path)
+                with self.assertRaisesRegex(codex_runtime.CodexRuntimeError, "extensions"):
+                    codex_runtime.CodexRuntime.prepare(self.work)
+                path.rmdir() if path.is_dir() else path.unlink()
+                codex_runtime.CodexRuntime.prepare(self.work)  # restored state is valid again
+        with self.subTest("skills is a file"):
+            shutil.rmtree(home / "skills")
+            (home / "skills").write_text("x")
+            with self.assertRaisesRegex(codex_runtime.CodexRuntimeError, "extensions"):
+                codex_runtime.CodexRuntime.prepare(self.work)
+
+    def link_directory(self, link: Path, target: Path) -> None:
+        if sys.platform == "win32":  # junctions need no privileges
+            result = subprocess.run(
+                ["cmd", "/c", "mklink", "/J", str(link), str(target)], capture_output=True
+            )
+            if result.returncode:
+                self.skipTest("cannot create a junction here")
+        else:
+            link.symlink_to(target, target_is_directory=True)
+
+    def test_linked_skills_paths_are_rejected(self) -> None:
+        home = codex_runtime.CodexRuntime.prepare(self.work).home
+        outside = self.root / "personal-skills"
+        (outside / "skill").mkdir(parents=True)
+        (outside / "skill" / "SKILL.md").write_text("personal")
+        for place in (home / "skills" / ".system", home / "skills"):
+            with self.subTest(place=place.name):
+                shutil.rmtree(home / "skills", ignore_errors=True)
+                place.parent.mkdir(parents=True, exist_ok=True)
+                self.link_directory(place, outside)
+                with self.assertRaisesRegex(codex_runtime.CodexRuntimeError, "extensions"):
+                    codex_runtime.CodexRuntime.prepare(self.work)
+                os.rmdir(place) if sys.platform == "win32" else place.unlink()
+        shutil.rmtree(home / "skills", ignore_errors=True)
+        system = self.populate_system_skills(home)
+        self.link_directory(system / "imagegen" / "scripts" / "linked", outside)
+        with self.assertRaisesRegex(codex_runtime.CodexRuntimeError, "linked path"):
+            codex_runtime.CodexRuntime.prepare(self.work)
+        self.assertEqual((outside / "skill" / "SKILL.md").read_text(), "personal")
 
     def test_hardlinked_authentication_is_rejected_without_reading_credentials(self) -> None:
         runtime = codex_runtime.CodexRuntime.prepare(self.work)

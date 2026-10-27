@@ -112,6 +112,70 @@ def _guard_sources(workdir: Path, profile: Path) -> None:
         raise CodexRuntimeError("Codex isolation profile must differ from the personal profile")
 
 
+_SYSTEM_SKILLS = ".system"
+_SYSTEM_SKILLS_MARKER = ".codex-system-skills.marker"
+_MAX_SYSTEM_SKILL_ENTRIES = 5000
+_MAX_SYSTEM_SKILL_DEPTH = 8
+_REPARSE_POINT = 0x400  # FILE_ATTRIBUTE_REPARSE_POINT
+
+
+def _linked(path: Path, info: os.stat_result) -> bool:
+    return (
+        stat.S_ISLNK(info.st_mode)
+        or path.is_junction()
+        or bool(getattr(info, "st_file_attributes", 0) & _REPARSE_POINT)
+    )
+
+
+def _check_skills(skills: Path) -> None:
+    """Allow only Codex's own bundled skills (``skills/.system``), never user skills.
+
+    Codex installs and refreshes ``.system`` itself: it replaces the whole directory
+    whenever its embedded fingerprint, stored in the marker, no longer matches, so the
+    content legitimately changes with each Codex release and is not pinned here. The
+    layout is validated instead: nothing but ``.system`` beside it, and inside it only
+    plain, unlinked directories and files within sane bounds. Content is not authenticated;
+    a skill planted inside ``.system`` by the same user is not detected (see the docs).
+    """
+
+    def refuse(entry: Path, why: str) -> CodexRuntimeError:
+        return CodexRuntimeError(f"Codex isolation refuses profile extensions at {entry}: {why}")
+
+    try:
+        info = skills.lstat()
+    except FileNotFoundError:
+        return
+    if _linked(skills, info) or not stat.S_ISDIR(info.st_mode):
+        raise refuse(skills, "not a plain directory")
+    for child in skills.iterdir():
+        if child.name != _SYSTEM_SKILLS:
+            raise refuse(child, "only Codex's bundled skills/.system is accepted")
+    system = skills / _SYSTEM_SKILLS
+    try:
+        info = system.lstat()
+    except FileNotFoundError:
+        return
+    if _linked(system, info) or not stat.S_ISDIR(info.st_mode):
+        raise refuse(system, "not a plain directory")
+    pending = [(system, 0)]
+    seen = 0
+    while pending:
+        directory, depth = pending.pop()
+        for entry in directory.iterdir():
+            seen += 1
+            if seen > _MAX_SYSTEM_SKILL_ENTRIES or depth >= _MAX_SYSTEM_SKILL_DEPTH:
+                raise refuse(entry, "bundled skills exceed the expected size")
+            info = entry.lstat()
+            if _linked(entry, info):
+                raise refuse(entry, "linked path")
+            if stat.S_ISDIR(info.st_mode):
+                pending.append((entry, depth + 1))
+            elif not stat.S_ISREG(info.st_mode) or info.st_nlink > 1:
+                raise refuse(entry, "not a plain file")
+            elif directory == system and entry.name != _SYSTEM_SKILLS_MARKER:
+                raise refuse(entry, "unexpected file")
+
+
 @dataclass(frozen=True)
 class CodexRuntime:
     home: Path
@@ -155,9 +219,9 @@ class CodexRuntime:
                 auth.is_symlink() or auth.is_junction() or auth.stat().st_nlink > 1
             ):
                 raise CodexRuntimeError("Codex isolation refuses linked authentication")
+            _check_skills(home / "skills")
             for relative in (
                 "plugins",
-                "skills",
                 "hooks",
                 "rules",
                 "hooks.json",
