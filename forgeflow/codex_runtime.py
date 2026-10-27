@@ -18,6 +18,10 @@ from forgeflow.errors import ProviderError, ToolNotFoundError
 from forgeflow.proc import CommandResult, Runner
 
 _CONFIG = 'cli_auth_credentials_store = "file"\n'
+# Independent CODEX_HOME does not disable account-backed plugin discovery after login.
+# Apply these global switches to probes and execution, then check their effective values.
+DISABLED_FEATURES = ("plugins", "remote_plugin", "apps")
+ISOLATION_ARGS = tuple(arg for feature in DISABLED_FEATURES for arg in ("--disable", feature))
 _LOCAL_SOURCES = (
     ".codex/config.toml",
     ".codex/hooks.json",
@@ -178,6 +182,20 @@ class CodexRuntime:
 
     def verify(self, runner: Runner, command: Sequence[str]) -> None:
         """Inventory the effective cwd, then check auth; never expose raw diagnostic output."""
+        features = self._probe(runner, [*command, "features", "list"])
+        effective: dict[str, list[str]] = {}
+        if features.ok:
+            for line in features.stdout.splitlines():
+                fields = line.split()
+                if fields and fields[0] in DISABLED_FEATURES:
+                    effective.setdefault(fields[0], []).append(fields[-1])
+        unsafe = [feature for feature in DISABLED_FEATURES if effective.get(feature) != ["false"]]
+        if unsafe:
+            raise CodexRuntimeError(
+                "Codex isolation could not verify disabled plugin/account features: "
+                + ", ".join(unsafe)
+                + ". No model was run."
+            )
         for args, kind in (
             (["mcp", "list", "--json"], "MCP"),
             (["plugin", "list", "--json"], "plugin"),
@@ -198,8 +216,9 @@ class CodexRuntime:
                 )
             )
             if not clean:
+                reason = " (probe timed out after 30 seconds)" if result.timed_out else ""
                 raise CodexRuntimeError(
-                    f"Codex isolation could not verify an empty {kind} inventory; "
+                    f"Codex isolation could not verify an empty {kind} inventory{reason}; "
                     "check managed/system configuration and CLI compatibility. No model was run."
                 )
         auth = self._probe(runner, [*command, "login", "status"])

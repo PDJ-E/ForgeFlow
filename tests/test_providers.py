@@ -55,7 +55,10 @@ class ScriptedRunner:
         input_text: str | None = None,
         env: Mapping[str, str] | None = None,
     ) -> CommandResult:
-        code, out = self.responses.get(tuple(argv[1:]), (1, ""))
+        tail = list(argv[1:])
+        while tail[:1] == ["--disable"]:
+            tail = tail[2:]
+        code, out = self.responses.get(tuple(tail), (1, ""))
         return CommandResult(tuple(argv), code, out, "")
 
 
@@ -111,6 +114,10 @@ class DetectionTests(unittest.TestCase):
                 ("login", "status"): (1, "Not logged in\n"),
                 ("mcp", "list", "--json"): (0, "[]"),
                 ("plugin", "list", "--json"): (0, '{"installed":[],"available":[]}'),
+                ("features", "list"): (
+                    0,
+                    "plugins stable false\nremote_plugin stable false\napps stable false",
+                ),
             }
         )
         with mock.patch("forgeflow.providers.which", return_value="C:/npm/codex.cmd"):
