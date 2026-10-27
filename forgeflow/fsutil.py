@@ -85,8 +85,20 @@ def _explain_long_path(path: Path, name_length: int, exc: OSError) -> OSError | 
 
 
 def read_json(path: Path) -> Any:
-    with open(path, encoding="utf-8") as fh:
-        return json.load(fh)
+    """Load a JSON file. On Windows, opening a file while another process replaces it can fail
+    with a sharing violation (``PermissionError``); that is retried with the same backoff as
+    the replace itself, then raised. Other errors are not retried."""
+    delay = 0.01
+    for attempt in range(_REPLACE_ATTEMPTS):
+        try:
+            with open(path, encoding="utf-8") as fh:
+                return json.load(fh)
+        except PermissionError:
+            if os.name != "nt" or attempt == _REPLACE_ATTEMPTS - 1:
+                raise
+            time.sleep(delay)
+            delay = min(delay * 2, 0.5)
+    raise AssertionError("unreachable")  # pragma: no cover
 
 
 def _replace_with_retry(src: str, dst: Path) -> None:

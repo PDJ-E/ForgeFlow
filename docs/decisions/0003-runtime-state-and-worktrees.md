@@ -91,3 +91,12 @@ Thin adapters at `.claude/skills/forge/SKILL.md` (Claude Code, `disable-model-in
 8. Remote URLs with embedded credentials were persisted and shown by `doctor`. User info is now stripped on discovery, when loading records, and in command diagnostics.
 
 The minimum Python version was raised from 3.10 to 3.13 at the same time (see *Language and dependencies*).
+
+**2026-10-26: Checkpoint C** ([ADR 0005](0005-build-review-and-delivery.md)). The decision stands; these parts changed:
+
+- The job schema is version 3 (delivery and board records, `attempts.human_resumes`); versions 1 and 2 still load.
+- A review interrupted mid-way may be resumed by the job's **builder** lease as well as a reviewer lease: the orchestrator owns the job throughout and the reviewer is its read-only subprocess. A reviewer lease still cannot enter `building`.
+- `needs_human -> ready` (a human continuing an escalated job, with a reason) resets `attempts.rework`, so the bound of 2 applies per human decision; `attempts.build` keeps the total.
+- Providers are started through `proc.run_tracked`, which records the provider PID and start time in the lease before the provider does any work. Killing the orchestrator on Windows ends its provider with it (kill-on-close Job Object), shown by a cross-process test.
+- `JobStore.listeners` are called after every committed transition, outside the state lock (the Project Status sync). A listener's failure never undoes or blocks a transition.
+- Providers no longer get a `git-commit` operation: ForgeFlow commits the builder's changes itself after checking them against the task's paths.

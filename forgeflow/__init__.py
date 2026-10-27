@@ -1,4 +1,4 @@
-"""ForgeFlow: a human-guided, multi-model software factory (Checkpoint A harness)."""
+"""ForgeFlow: a human-guided, multi-model software factory (pre-alpha, Checkpoints A-C)."""
 
 import sys
 

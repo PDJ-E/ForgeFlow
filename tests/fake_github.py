@@ -8,6 +8,7 @@ failures can be replayed deterministically.
 from __future__ import annotations
 
 import json
+import subprocess
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -27,7 +28,15 @@ class FakeGitHubWorld:
         repo: str = "example/demo",
         *,
         private: bool = False,
-        statuses: Sequence[str] | None = ("Backlog", "Ready", "Building", "Done"),
+        statuses: Sequence[str] | None = (
+            "Backlog",
+            "Ready",
+            "Building",
+            "QA",
+            "Review",
+            "Blocked",
+            "Done",
+        ),
         mutation_scope: bool = True,
     ) -> None:
         self.repo = repo
@@ -35,9 +44,14 @@ class FakeGitHubWorld:
         self.statuses = statuses
         self.mutation_scope = mutation_scope
         self.offline = False
-        self.crash_after: set[str] = set()  # write names: create_issue, add_item, set_status
+        # write names: create_issue, add_item, set_status, create_pr, update_pr
+        self.crash_after: set[str] = set()
         self.issues: dict[int, dict[str, Any]] = {}
         self.items: dict[str, dict[str, Any]] = {}  # item id -> {content, status}
+        self.pulls: dict[int, dict[str, Any]] = {}  # PR number -> REST-like record
+        # A local bare repository standing in for the GitHub remote: PR heads are read from it,
+        # so a PR shows exactly what was really pushed.
+        self.remote: Path | None = None
         self.calls: list[tuple[str, ...]] = []
         self.writes: list[str] = []
 
@@ -98,7 +112,96 @@ class FakeGitHubWorld:
             return self._graphql(argv, query, variables)
         raise AssertionError(f"unexpected command {argv}")
 
+    # --- pull requests ---------------------------------------------------------------------------
+
+    def branch_head(self, branch: str) -> str:
+        if self.remote is None:
+            raise AssertionError("set world.remote to a bare repository to use pull requests")
+        out = subprocess.run(
+            ["git", "-C", str(self.remote), "rev-parse", f"refs/heads/{branch}"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if out.returncode != 0:
+            raise AssertionError(f"branch {branch} was never pushed")
+        return out.stdout.strip()
+
+    def _pr_rest(self, pr: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "number": pr["number"],
+            "html_url": f"https://github.com/{self.repo}/pull/{pr['number']}",
+            "node_id": f"PR_node{pr['number']}",
+            "state": pr["state"],
+            "draft": pr["draft"],
+            "merged_at": "2026-10-26T00:00:00Z" if pr["merged"] else None,
+            "head": {"ref": pr["head"], "sha": self.branch_head(pr["head"])},
+            "base": {"ref": pr["base"]},
+            "body": pr["body"],
+            "title": pr["title"],
+        }
+
+    def merge(self, number: int) -> None:
+        """The human merges on GitHub (only ever done by a test acting as the owner)."""
+        pr = self.pulls[number]
+        pr.update(state="closed", merged=True, merged_sha=self.branch_head(pr["head"]))
+
+    def _pulls_rest(self, argv: Sequence[str], method: str, path: str, body: Any) -> CommandResult:
+        prefix = f"repos/{self.repo}/pulls"
+        if method == "GET" and path.startswith(prefix + "?"):
+            query = dict(p.split("=", 1) for p in path.split("?", 1)[1].split("&"))
+            head = query["head"].split(":", 1)[1]
+            found = [self._pr_rest(p) for p in self.pulls.values() if p["head"] == head]
+            return self._ok(argv, found)
+        if method == "POST" and path == prefix:
+            if any(p["head"] == body["head"] and p["state"] == "open" for p in self.pulls.values()):
+                return CommandResult(
+                    tuple(argv), 1, "", "gh: A pull request already exists (HTTP 422)"
+                )
+            self.branch_head(body["head"])  # GitHub refuses a PR from a branch it does not have
+            number = max([*self.issues, *self.pulls], default=0) + 1
+            self.pulls[number] = {
+                "number": number,
+                "head": body["head"],
+                "base": body["base"],
+                "title": body["title"],
+                "body": body["body"],
+                "draft": bool(body.get("draft")),
+                "state": "open",
+                "merged": False,
+            }
+            self._write("create_pr")
+            self._maybe_crash("create_pr")
+            return self._ok(argv, self._pr_rest(self.pulls[number]))
+        if method == "PATCH" and path.startswith(prefix + "/"):
+            pr = self.pulls[int(path.rsplit("/", 1)[1])]
+            pr.update(title=body["title"], body=body["body"])
+            self._write("update_pr")
+            self._maybe_crash("update_pr")
+            return self._ok(argv, self._pr_rest(pr))
+        return CommandResult(tuple(argv), 1, "", f"gh: Not Found (HTTP 404) {path}")
+
+    def _pr_graphql(self, number: int) -> dict[str, Any] | None:
+        pr = self.pulls.get(number)
+        if pr is None:
+            return None
+        head = pr.get("merged_sha") or self.branch_head(pr["head"])
+        return {
+            "number": number,
+            "url": f"https://github.com/{self.repo}/pull/{number}",
+            "state": "MERGED" if pr["merged"] else pr["state"].upper(),
+            "isDraft": pr["draft"],
+            "merged": pr["merged"],
+            "mergedAt": "2026-10-26T00:00:00Z" if pr["merged"] else None,
+            "headRefName": pr["head"],
+            "headRefOid": head,
+            "baseRefName": pr["base"],
+            "headRepository": {"nameWithOwner": self.repo},
+        }
+
     def _rest(self, argv: Sequence[str], method: str, path: str, body: Any) -> CommandResult:
+        if path.startswith(f"repos/{self.repo}/pulls"):
+            return self._pulls_rest(argv, method, path, body)
         prefix = f"repos/{self.repo}/issues"
         if method == "POST" and path == prefix:
             number = max(self.issues, default=0) + 1
@@ -135,6 +238,14 @@ class FakeGitHubWorld:
                 "scopes: ['project'], but your token has only been granted the: ['repo'] scopes.",
             }
             return CommandResult(tuple(argv), 1, json.dumps({"errors": [error]}), "")
+        if "convertPullRequestToDraft" in query:
+            self.pulls[int(v["id"].removeprefix("PR_node"))]["draft"] = True
+            self._write("convert_to_draft")
+            converted = {"convertPullRequestToDraft": {"pullRequest": {"isDraft": True}}}
+            return self._ok(argv, {"data": converted})
+        if "pullRequest(number" in query:
+            pr_node = self._pr_graphql(int(v["number"]))
+            return self._ok(argv, {"data": {"repository": {"pullRequest": pr_node}}})
         if "addProjectV2ItemById" in query:
             existing = next(
                 (k for k, i in self.items.items() if i["content"] == v["contentId"]), None

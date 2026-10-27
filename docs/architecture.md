@@ -1,7 +1,7 @@
 # ForgeFlow — architecture and design boundaries
 
-**Status:** design direction. Checkpoints A and B implement the runtime and the planning workflow ([ADR 0003](decisions/0003-runtime-state-and-worktrees.md), [ADR 0004](decisions/0004-planning-workflow-and-gate-a.md)); the build, review and knowledge parts below are still proposals.  
-**Last reviewed:** 2026-10-25.
+**Status:** design direction. Checkpoints A to C implement the runtime, the planning workflow and the build-review-PR path ([ADR 0003](decisions/0003-runtime-state-and-worktrees.md), [ADR 0004](decisions/0004-planning-workflow-and-gate-a.md), [ADR 0005](decisions/0005-build-review-and-delivery.md)); the knowledge and learning parts below are still proposals.  
+**Last reviewed:** 2026-10-26.
 
 ForgeFlow is a human-governed, multi-model software engineering workflow. It should connect idea exploration, product definition, architecture decisions, verified implementation, independent review, and learning while minimizing unnecessary agents and operational complexity.
 
@@ -114,4 +114,4 @@ These are intentionally **not settled**:
 9. What is the smallest end-to-end pilot that demonstrates value without touching production services?
 10. How will the selected knowledge adapter enforce directory-scoped reads/writes when the host already exposes an unrestricted Obsidian MCP server?
 
-Questions 3 and 4 are resolved, and 1, 2 and 6 partially, by [ADR 0003](decisions/0003-runtime-state-and-worktrees.md) and the Checkpoint A findings in [getting started](getting-started.md#verified-invocation). [ADR 0004](decisions/0004-planning-workflow-and-gate-a.md) resolves 2 for the interactive hosts and 5 (one issue per approved plan, the existing Status field, an existing option chosen at `init`), and records the Gate A threat model. See the [MVP v0.1 scope](mvp-scope.md) and [roadmap](roadmap.md) for agreed boundaries and sequencing. Do not resolve open questions by assumption in a generative build prompt; verify and record decisions in ADRs or Issues.
+Questions 3 and 4 are resolved, and 1, 2 and 6 partially, by [ADR 0003](decisions/0003-runtime-state-and-worktrees.md) and the Checkpoint A findings in [getting started](getting-started.md#verified-invocation). [ADR 0004](decisions/0004-planning-workflow-and-gate-a.md) resolves 2 for the interactive hosts and 5 (one issue per approved plan, the existing Status field, an existing option chosen at `init`), and records the Gate A threat model. [ADR 0005](decisions/0005-build-review-and-delivery.md) resolves 7 (review contract and escalation) and the Status transitions of 5, and refines 6 (measured tokens; Claude's cost as an API-equivalent estimate). See the [MVP v0.1 scope](mvp-scope.md) and [roadmap](roadmap.md) for agreed boundaries and sequencing. Do not resolve open questions by assumption in a generative build prompt; verify and record decisions in ADRs or Issues.

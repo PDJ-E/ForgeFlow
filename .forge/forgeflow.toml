@@ -1,0 +1,29 @@
+# ForgeFlow's own deterministic checks. `forgeflow run` executes them itself, in the job's
+# worktree, on every build round's commit; a round is delivered only if all of them pass.
+# They are read from the job's base commit (or this checkout's HEAD), never from the
+# builder's worktree. {python} is the interpreter running ForgeFlow (3.13+).
+# Format: docs/getting-started.md#configure-the-checks
+
+[checks]
+timeout_seconds = 900  # per command
+
+[[checks.commands]]
+name = "unit tests"
+argv = ["{python}", "-m", "unittest", "discover", "-s", "tests", "-t", "."]
+
+[[checks.commands]]
+name = "ruff check"
+argv = ["{python}", "-m", "ruff", "check", "."]
+
+[[checks.commands]]
+name = "ruff format"
+argv = ["{python}", "-m", "ruff", "format", "--check", "."]
+
+[[checks.commands]]
+name = "mypy"
+argv = ["{python}", "-m", "mypy"]
+
+[build]
+allowed_paths = ["*"]
+# Changes here are never committed by ForgeFlow; they go to a human.
+protected_paths = [".forge/*", ".github/*", "LICENSE", "ATTRIBUTION.md"]

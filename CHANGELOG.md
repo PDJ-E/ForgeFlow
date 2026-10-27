@@ -40,7 +40,20 @@ All the above documentation was introduced as the project's initial foundation i
   - `forgeflow init` binds a GitHub Project after checking its Status field; `forgeflow skills` discovers the Product Management and Engineering skills each host can use: Claude Code plugins, and Codex plugins or skill folders such as `~/.agents/skills` (matched by their recorded Anthropic provenance), with the exact name each host invokes them by.
   - [ADR 0004](docs/decisions/0004-planning-workflow-and-gate-a.md), with the Gate A threat model and verification in the real Claude Code and Codex hosts.
 
-**No real Claude/Codex builder execution, branch or PR creation, dashboard or knowledge adapter has been implemented yet.**
+- **Checkpoint C: build, checks, independent review, bounded rework and draft PR** (pre-alpha, unreleased):
+  - `forgeflow run <job> --builder claude|codex --reviewer claude|codex`: runs an approved, handed-off job to Gate B. Both providers are named by the human and checked first (installed, logged in, the CLI options relied on, a working sandbox); an unavailable one stops the run before anything is dispatched.
+  - Real Claude Code and Codex CLI execution with invocations verified against Claude Code 2.1.311 and Codex CLI 0.164.0: a Claude builder has only file tools confined to the worktree, no commands, settings, hooks or MCP; a Codex builder uses its `workspace-write` sandbox; both reviewers are read-only. The prompt goes on stdin, the provider's PID and start time are recorded in the job lease while it runs, and a timeout kills its whole process tree.
+  - ForgeFlow, not the builder, commits: it checks git's own list of changes against the configured allowed and protected paths, keeps out-of-scope changes uncommitted for a human, and never resets, stashes or cleans.
+  - Repository-configured checks in a committed `.forge/forgeflow.toml`, read from the job's base commit (or the checkout's HEAD), never from the builder's worktree; results record the commit, commands, exit codes, durations, output tails and whether they are real.
+  - Review of a disposable `git archive` snapshot of exactly the validated commit, against the approved plan, the diff and the check results; changes are requested only for blocking or major findings; the reviewer must return a random token from a snapshot file that is not in its prompt, so a review that never read the snapshot is blocked rather than approved (found in the live run); only ForgeFlow's own recorded verification lets resume reuse an approval or delivery push, so approvals recorded before the check are reviewed again rather than trusted; a failed, unavailable or sandbox-refused reviewer never counts as an approval and never triggers rework.
+  - At most two automatic rework rounds (failed checks, review findings or the owner's `forgeflow rework` request), each told what to fix; then `needs_human`. A human continues with `forgeflow run --reason`, optionally with other providers.
+  - One draft PR per job, opened after a non-forced push of the job branch, with scope, "Closes #N", changes, check table, review, rounds, limitations and traceability; reused and updated on retries and rework, turned back into a draft if it was marked ready, verified to carry the validated commit before Gate B. ForgeFlow never merges; `forgeflow sync` records a merge only when GitHub reports it for that commit.
+  - The GitHub Project Status follows the job from one table (Ready, Building, QA, Review, Blocked, Done), synced after every transition and on `forgeflow sync`, idempotently; Done only after a merge GitHub confirms; issues are never closed by ForgeFlow.
+  - `forgeflow resume` continues an interrupted job in the phase it was in without a duplicate provider, a rebuild of an approved commit or a second PR. On Windows a killed orchestrator takes its provider with it.
+  - Verified live with the real CLIs (ADR 0005): Claude Code builder and Codex reviewer end to end on this repository, from an owner-approved plan to draft [PR #8](https://github.com/PDJ-E/ForgeFlow/pull/8) with green CI, unmerged (its Codex approval is recorded as unverified: the reviewer could not read the snapshot; snapshot access by both reviewers was re-verified live after the fix); Codex builder and Claude reviewer through the same provider classes on a disposable local repository.
+  - `/forge` and `$forge` can run `run`, `resume`, `rework` and `sync` when the user asks; [ADR 0005](docs/decisions/0005-build-review-and-delivery.md); ForgeFlow's own checks in `.forge/forgeflow.toml`; 79 new tests, including cross-process interruption tests.
+
+**No dashboard or knowledge adapter has been implemented yet.**
 
 ### Changed
 
@@ -52,11 +65,13 @@ All the above documentation was introduced as the project's initial foundation i
 - Jobs started by discovery have no builder (`unassigned`), and no worker lease can be taken for them until a builder is assigned (Checkpoint C).
 - The `/forge` and `$forge` adapters cover the planning workflow, share one command table (checked by a test) and never run `approve`.
 - The status lines of the roadmap, MVP scope, architecture, README and ADR 0001 now describe the merged Checkpoints A and B instead of "not started" or "design stage". An ADR 0002 amendment records the current pilot vault setup and that it is not the disposable test vault.
+- Job records are schema version 3 (delivery and board records, human continuations); versions 1 and 2 still load. A review interrupted mid-way can be resumed by the job's builder lease. Continuing an escalated job resets its automatic rework budget. `forgeflow doctor` no longer calls provider execution "not implemented".
 
 ### Fixed
 
 - Repositories nested deep on Windows no longer fail when a plan is submitted. Plan snapshots are now named `plans/v1.md`, `plans/v2.md`, … instead of by their 64-character hash. The full sha256 is still recorded and re-verified on every read, and existing hash-named snapshots keep working. Roots up to about 185 characters work without Windows long paths; deeper paths stop with a clear "path too long" error before anything is written.
 - `forgeflow handoff --dry-run` on a plan that was already handed off no longer claims it would create a new issue.
+- On Windows, reading a job record while another process replaces it (`forgeflow status` during a run, a second process polling) could fail with a sharing violation; reads now retry briefly, like the atomic replace itself.
 
 ### Security
 

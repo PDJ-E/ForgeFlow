@@ -140,7 +140,7 @@ class ApprovalContext:
 
 DEFAULT_NOT_AUTHORISED = (
     "writing or changing code, creating worktrees, branches or pull requests",
-    "dispatching Claude Code, Codex or any other builder (Checkpoint C, separately gated)",
+    "dispatching Claude Code, Codex or any other builder (a separate `forgeflow run`)",
     "merging, deploying or any production operation",
     "publishing discovery notes or local knowledge (they never leave this machine)",
     "any later version of this plan: any change invalidates this approval",

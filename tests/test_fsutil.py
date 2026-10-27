@@ -8,6 +8,7 @@ import threading
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from forgeflow import fsutil
 from forgeflow.errors import LockTimeoutError, ValidationError
@@ -16,6 +17,7 @@ from tests.support import PROJECT_ROOT, rmtree
 _HOLD_LOCK = """
 import sys, time
 from pathlib import Path
+from unittest import mock
 from forgeflow.fsutil import FileLock
 lock = FileLock(Path(sys.argv[1]))
 lock.acquire()
@@ -96,6 +98,47 @@ class FsutilTests(unittest.TestCase):
         fsutil.write_self_ignoring_gitignore(d)
         fsutil.write_self_ignoring_gitignore(d)
         self.assertIn("*", (d / ".gitignore").read_text(encoding="utf-8").splitlines())
+
+    def test_reads_retry_a_transient_sharing_violation_on_windows(self) -> None:
+        """Regression (CI, 2026-10-27): a reader polling job.json while another process replaced
+        it got PermissionError on Windows."""
+        target = self.dir / "job.json"
+        fsutil.atomic_write_json(target, {"revision": 1})
+        real_open = open
+        failures = [PermissionError(13, "sharing violation")] * 2
+
+        def flaky_open(*args: object, **kwargs: object) -> object:
+            if failures:
+                raise failures.pop()
+            return real_open(*args, **kwargs)  # type: ignore[call-overload]
+
+        with mock.patch("builtins.open", flaky_open):
+            if os.name == "nt":
+                self.assertEqual(fsutil.read_json(target), {"revision": 1})
+            else:  # no such transient condition on POSIX: never retried
+                with self.assertRaises(PermissionError):
+                    fsutil.read_json(target)
+
+    def test_reads_during_concurrent_replaces_always_see_a_whole_record(self) -> None:
+        target = self.dir / "job.json"
+        fsutil.atomic_write_json(target, {"revision": 0})
+        stop = threading.Event()
+
+        def writer() -> None:
+            n = 0
+            while not stop.is_set():
+                n += 1
+                fsutil.atomic_write_json(target, {"revision": n, "pad": "x" * 2000})
+
+        thread = threading.Thread(target=writer)
+        thread.start()
+        try:
+            deadline = time.monotonic() + 1.5
+            while time.monotonic() < deadline:
+                self.assertIn("revision", fsutil.read_json(target))
+        finally:
+            stop.set()
+            thread.join(timeout=10)
 
 
 class FileLockTests(unittest.TestCase):

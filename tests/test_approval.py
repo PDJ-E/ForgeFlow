@@ -250,7 +250,7 @@ class StateBoundaryTests(GitRepoTestCase):
         self.assertIsNone(loaded.github.handoff)
         updated = self.store.update(job.job_id, lambda j: None, event="touch")
         raw = json.loads((self.store.job_dir(job.job_id) / "job.json").read_text("utf-8"))
-        self.assertEqual((updated.schema_version, raw["schema_version"]), (2, 2))
+        self.assertEqual((updated.schema_version, raw["schema_version"]), (3, 3))
 
 
 class PrematureDispatchTests(GitRepoTestCase):

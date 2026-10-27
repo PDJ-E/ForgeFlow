@@ -16,7 +16,7 @@ step first looks for what an interrupted earlier run may already have done:
 
 Gate A is re-verified before every GitHub write, and a per-job OS lock keeps two handoffs of
 one job from racing. Handoff never prepares a worktree, assigns a builder or leaves
-PLAN_APPROVED: Checkpoint C does that.
+PLAN_APPROVED: ``forgeflow.pipeline`` does that.
 """
 
 from __future__ import annotations
