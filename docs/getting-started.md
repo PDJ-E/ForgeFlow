@@ -36,7 +36,7 @@ On the pilot machine (2026-10-25), `python` still resolves to **3.10.0** because
 ```powershell
 git clone https://github.com/PDJ-E/ForgeFlow.git
 cd ForgeFlow
-py -3.13 -m forgeflow doctor          # read-only environment report; exit 1 only if a required check fails
+py -3.13 -m forgeflow doctor          # inspection; may initialize the managed Codex profile
 py -3.13 -m forgeflow doctor --json   # machine-readable
 py -3.13 -m forgeflow doctor --offline  # skip checks that contact GitHub
 py -3.13 -m forgeflow status          # local jobs (read-only)
@@ -186,7 +186,7 @@ The output ends with the PR link (exit code 0) or the reason it needs you (exit 
 ### Provider notes
 
 - **Claude Code** builds with `--restricted`: your user and project settings, hooks and MCP servers are not loaded, and it has no command tool, so it learns about failing checks from the next round's prompt.
-- **Codex** runs with your own Codex configuration, **including your MCP servers and plugins**, which ForgeFlow cannot switch off per run (ADR 0005). Prefer Claude as the builder if that exposure matters for a repository.
+- **Codex** uses an independent, minimal application-data profile with separate authentication. Detection, preflight and execution verify empty effective MCP/plugin inventories. Complete the [isolated Codex setup](codex-runtime.md) before using it as builder or reviewer. Your normal interactive Codex profile is unchanged.
 - **Codex on Windows** (unelevated sandbox) refuses every write in a repository under `%TEMP%`; `run` refuses that location up front.
 - Token counts are shown when the CLI reports them; Claude's cost is an API-equivalent estimate, not a charge.
 

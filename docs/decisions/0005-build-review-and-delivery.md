@@ -30,7 +30,7 @@ What the probes showed:
 - **Claude reviewer:** has no edit tool; its answer arrives in `structured_output`.
 - **Codex reviewer:** `read-only` rejected an attempted edit (`patch rejected: writing is blocked by read-only sandbox`); the schema-shaped answer is the `-o` file.
 - **Codex builder:** `workspace-write` writes in a linked worktree under `.forge/worktrees`. In a repository under `%TEMP%` it refused every write and every command (`windows unelevated restricted-token sandbox cannot enforce split writable root sets directly; refusing to run unsandboxed`). ForgeFlow's preflight refuses that location on Windows, and the same message from a run is reported as `blocked`, not retried and not worked around.
-- **Codex MCP:** Codex starts the user's MCP servers and plugins (Obsidian, GitHub, context7, ...). `-c mcp_servers={}` has no effect, and per-server `enabled=false` overrides fail for plugin-provided servers. ForgeFlow does not edit the Codex configuration, so this exposure is a **recorded limitation**, repeated in every PR a Codex builder or reviewer worked on.
+- **Codex MCP (superseded by isolated runtime):** The initial implementation inherited the user's MCP servers and plugins. `-c mcp_servers={}` had no effect, and per-server overrides failed for plugin-provided servers. ForgeFlow now uses a dedicated `CODEX_HOME`, independent authentication, configuration-source guards and empty effective MCP/plugin inventory checks. See [setup and guarantees](../codex-runtime.md); the personal profile is never edited or copied.
 
 The prompt travels on stdin (Windows limits a command line to about 32,000 characters; a plan may be 60,000). The provider subprocess runs through `proc.run_tracked`, which reports its PID once it sits in its kill-on-close Job Object (Windows) or process group (POSIX); the lease records the PID and start time before the provider does any work and clears them when the process tree is gone. A run that exceeds its timeout (default 1,800 s) is killed with its whole tree.
 
@@ -140,7 +140,7 @@ Not exercised live: rework rounds and escalation with real providers (covered by
 ## Consequences
 
 - A builder cannot run tests itself when Claude Code builds (no command tool); it learns about failures from the next round's prompt. Codex can run commands inside its sandbox. Both are judged only by ForgeFlow's own check run.
-- Codex runs with the user's MCP servers and plugins (see above). Choose Claude as the builder when that exposure is not acceptable.
+- Codex configuration isolation blocks repositories with Codex settings/hooks/rules or plugin marketplaces and systems with detected managed configuration. It is not OS isolation; plain skills, repository instructions and sandbox-readable files remain accessible. See [runtime limitations](../codex-runtime.md).
 - Codex cannot build in a repository under `%TEMP%` on Windows with the unelevated sandbox.
 - Token counts are reported as measured when the CLI reports them (Claude: input including cache reads and writes; Codex: `turn.completed` usage). Claude's `total_cost_usd` is recorded as an **API-equivalent estimate**, not a charge: on a subscription nothing is billed per call. Codex reports no cost.
 - Checks run on the local machine; the repository's CI runs separately on the PR and is not a substitute for Gate B or vice versa.
@@ -149,4 +149,4 @@ Not exercised live: rework rounds and escalation with real providers (covered by
 
 ## Revisit
 
-Revisit when a provider offers a per-invocation way to disable MCP servers, when Codex's Windows sandbox supports workspaces under `%TEMP%`, or if a review contract richer than severity-tagged findings proves necessary in practice.
+Revisit when Codex offers an effective-configuration API suitable for relaxing the strict source guards, when its Windows sandbox supports workspaces under `%TEMP%`, or if a richer review contract proves necessary.

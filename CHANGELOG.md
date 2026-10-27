@@ -8,6 +8,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Security
+
+- ForgeFlow-managed Codex detection, preflight, builders and reviewers now use a
+  persistent isolated application-data profile with independent interactive login.
+  No personal settings, plugins or credentials are copied. Configuration-source
+  guards and empty effective MCP/plugin inventories fail closed; sandbox, process
+  tracking and review verification remain in place. This is configuration isolation,
+  not OS isolation. See [setup and limitations](docs/codex-runtime.md).
+
 ### Added
 
 - Established the open-source ForgeFlow repository and MIT license.

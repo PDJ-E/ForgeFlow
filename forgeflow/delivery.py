@@ -247,8 +247,9 @@ def pr_body(store: JobStore, job: Job, head: str) -> str:
     ]
     if "codex" in (job.policy.builder, job.policy.reviewer):
         limitations.append(
-            "Codex ran with the user's own MCP servers and plugins; ForgeFlow cannot disable "
-            "them per run."
+            "Codex configuration isolation is not operating-system isolation. "
+            "Only runs with an explicit isolation verification note establish the new guarantee; "
+            "historical evidence is not relabeled."
         )
     limitations.append(
         f"Checks ran locally on {platform.system()} {platform.release()} with ForgeFlow "

@@ -79,6 +79,15 @@ def _task(**overrides: object) -> ProviderTask:
 
 
 class DetectionTests(unittest.TestCase):
+    def setUp(self) -> None:
+        scratch = tempfile.TemporaryDirectory(prefix="forgeflow-detect-")
+        self.addCleanup(scratch.cleanup)
+        patch = mock.patch.dict(
+            os.environ, {"LOCALAPPDATA": scratch.name, "XDG_DATA_HOME": scratch.name}
+        )
+        patch.start()
+        self.addCleanup(patch.stop)
+
     def test_claude_detection_reads_version_auth_and_flags(self) -> None:
         runner = ScriptedRunner(
             {
@@ -100,6 +109,8 @@ class DetectionTests(unittest.TestCase):
                 ("--version",): (0, "codex-cli 0.164.0\n"),
                 ("exec", "--help"): (0, "-s, --sandbox <MODE> [read-only, workspace-write]"),
                 ("login", "status"): (1, "Not logged in\n"),
+                ("mcp", "list", "--json"): (0, "[]"),
+                ("plugin", "list", "--json"): (0, '{"installed":[],"available":[]}'),
             }
         )
         with mock.patch("forgeflow.providers.which", return_value="C:/npm/codex.cmd"):
@@ -204,6 +215,12 @@ class ExecutionTests(unittest.TestCase):
     def setUp(self) -> None:
         self.dir = Path(tempfile.mkdtemp(prefix="forgeflow-prov-"))
         self.addCleanup(rmtree, self.dir)
+        patch = mock.patch.dict(
+            os.environ,
+            {"LOCALAPPDATA": str(self.dir / "data"), "XDG_DATA_HOME": str(self.dir / "data")},
+        )
+        patch.start()
+        self.addCleanup(patch.stop)
         self.lease = StubLease("ff-20261024-abcdef")
 
     def cli(self, name: str, step: dict[str, Any]) -> list[str]:

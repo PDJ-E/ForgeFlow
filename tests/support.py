@@ -74,6 +74,8 @@ class GitRepoTestCase(unittest.TestCase):
                 "GIT_CONFIG_GLOBAL": str(gitconfig),
                 "GIT_CONFIG_NOSYSTEM": "1",
                 "PYTHONPATH": str(PROJECT_ROOT),
+                "LOCALAPPDATA": str(self.tmp / "appdata"),
+                "XDG_DATA_HOME": str(self.tmp / "appdata"),
             },
         )
         env.start()

@@ -1,6 +1,7 @@
 """``forgeflow doctor``: read-only inspection of the host, repository and providers.
 
-Nothing here installs, configures, authenticates or writes anything. Optional capabilities
+The Codex probe may create its minimal managed application-data profile; it never logs in
+or changes the personal profile or repository. Optional capabilities
 that are absent are reported as such; only missing *required* capabilities fail the report.
 No model is invoked, so whether plugin skills are usable inside provider subprocesses is
 reported as "not probed" rather than guessed.
@@ -20,7 +21,7 @@ from forgeflow.errors import ForgeFlowError, ToolNotFoundError
 from forgeflow.gitrepo import discover_identity, git, porcelain_status
 from forgeflow.hostskills import KNOWLEDGE_WORK_PLUGINS
 from forgeflow.proc import CommandResult, Runner, run_command, which
-from forgeflow.providers import REAL_PROVIDERS, ProviderCapabilities
+from forgeflow.providers import REAL_PROVIDERS, CodexProvider, ProviderCapabilities
 from forgeflow.store import RUNTIME_RELATIVE, JobStore
 
 MIN_GIT = (2, 31)  # `git rev-parse --path-format=absolute`
@@ -257,11 +258,16 @@ def linked_projects(runner: Runner, slug: str) -> list[dict[str, Any]] | None:
     return sorted(seen.values(), key=lambda p: p["number"])
 
 
-def check_providers(runner: Runner) -> list[Check]:
+def check_providers(runner: Runner, workdir: Path | None = None) -> list[Check]:
     checks: list[Check] = []
     caps_list: list[ProviderCapabilities] = []
     for name, cls in REAL_PROVIDERS.items():
-        caps = cls().detect(runner)
+        provider = cls()
+        caps = (
+            provider.detect(runner, workdir=workdir)
+            if isinstance(provider, CodexProvider)
+            else provider.detect(runner)
+        )
         caps_list.append(caps)
         if not caps.installed:
             checks.append(
@@ -274,6 +280,8 @@ def check_providers(runner: Runner) -> list[Check]:
         ]
         missing = [flag for flag, present in caps.features.items() if not present]
         summary = f"{caps.version or 'version unknown'}; {auth} ({caps.auth_detail})"
+        if caps.isolation_error:
+            summary += f"; {caps.isolation_error}"
         if missing:
             summary += f"; options not found in help: {', '.join(missing)}"
         checks.append(Check(f"provider:{name}", status, False, summary, caps.to_dict()))
@@ -353,7 +361,7 @@ def inspect_environment(
     if root is not None:
         checks.append(check_runtime(root))
     checks.extend(check_github(runner, repo_check.data.get("slug"), network))
-    checks.extend(check_providers(runner))
+    checks.extend(check_providers(runner, root or start))
     checks.append(check_plugins(runner))
     if root is not None:
         checks.append(check_skill_adapters(root))

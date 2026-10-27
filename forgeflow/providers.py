@@ -12,8 +12,8 @@ Code 2.1.311, Codex CLI 0.164.0, Windows 11) before they were written; see ADR 0
 * **Claude Code reviewer:** the same with ``--tools Read,Glob,Grep --permission-mode dontAsk``
   and ``--json-schema`` (the answer arrives in ``structured_output``).
 * **Codex builder:** ``codex exec -s workspace-write -C <worktree>``; **reviewer:** ``-s
-  read-only`` with ``--output-schema``. Codex loads the user's MCP servers and plugins, which
-  ForgeFlow cannot switch off per invocation (recorded as a limitation in ADR 0005). On
+  read-only`` with ``--output-schema``. Both use a minimal independent ``CODEX_HOME``;
+  configuration sources and effective MCP/plugin inventories are checked before dispatch. On
   Windows its unelevated sandbox refuses every write in a workspace under ``%TEMP%``.
 
 Providers never commit, push or open pull requests: ForgeFlow does that after checking the
@@ -34,12 +34,13 @@ import os
 import sys
 import tempfile
 from abc import ABC, abstractmethod
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any
 
 from forgeflow import fsutil, prompts
+from forgeflow.codex_runtime import CodexAuthenticationError, CodexRuntime, CodexRuntimeError
 from forgeflow.errors import LeaseError, ProviderError, ToolNotFoundError, ValidationError
 from forgeflow.jobs import Policy
 from forgeflow.proc import (
@@ -210,6 +211,7 @@ class ProviderCapabilities:
     auth_detail: str = ""
     features: dict[str, bool] = field(default_factory=dict)
     notes: list[str] = field(default_factory=list)
+    isolation_error: str = ""
 
     @property
     def installed(self) -> bool:
@@ -217,7 +219,7 @@ class ProviderCapabilities:
 
     @property
     def available(self) -> bool:
-        return self.installed and self.authenticated is True
+        return self.installed and self.authenticated is True and not self.isolation_error
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
@@ -241,9 +243,16 @@ class Provider(ABC):
         """Raise ProviderUnavailableError if ``role`` cannot run safely here. Default: fine."""
 
 
-def _safe(runner: Runner, argv: list[str], timeout: float = 30) -> CommandResult | None:
+def _safe(
+    runner: Runner,
+    argv: list[str],
+    timeout: float = 30,
+    *,
+    cwd: Path | None = None,
+    env: Mapping[str, str] | None = None,
+) -> CommandResult | None:
     try:
-        return runner(argv, timeout=timeout)
+        return runner(argv, timeout=timeout, cwd=cwd, env=env)
     except ToolNotFoundError:
         return None
 
@@ -314,11 +323,13 @@ class _CliProvider(Provider):
     def preflight(self, role: str, workdir: Path | None = None) -> None:
         if self.command is not None:
             return
-        caps = self.detect()
+        caps = self._detect_for_workdir(workdir)
         problems: list[str] = []
         if not caps.installed:
             problems.append(f"`{self.executable_name}` is not installed or not on PATH")
         else:
+            if caps.isolation_error:
+                problems.append(caps.isolation_error)
             if caps.authenticated is not True:
                 state = "not logged in" if caps.authenticated is False else "unverified"
                 problems.append(f"authentication is {state} ({caps.auth_detail or 'no detail'})")
@@ -337,8 +348,17 @@ class _CliProvider(Provider):
     def _workspace_problems(self, role: str, workdir: Path | None) -> list[str]:
         return []
 
+    def _detect_for_workdir(self, workdir: Path | None) -> ProviderCapabilities:
+        return self.detect()
+
     def _run(
-        self, task: ProviderTask, lease: LeaseHandle, argv: list[str], prompt: str
+        self,
+        task: ProviderTask,
+        lease: LeaseHandle,
+        argv: list[str],
+        prompt: str,
+        *,
+        env: Mapping[str, str] | None = None,
     ) -> CommandResult:
         task.validate()
         if lease.job_id != task.job_id or not lease.active:
@@ -354,6 +374,7 @@ class _CliProvider(Provider):
                 timeout=task.timeout_seconds,
                 input_text=prompt,
                 on_start=record,
+                env=env,
             )
         except ToolNotFoundError as exc:
             raise ProviderUnavailableError(f"{self.name}: {exc}") from exc
@@ -553,32 +574,44 @@ class CodexProvider(_CliProvider):
     # Messages with which Codex's sandbox refuses to run rather than run unsandboxed.
     _SANDBOX_REFUSALS = ("refusing to run unsandboxed", "UnsupportedOperation")
 
-    def detect(self, runner: Runner = run_command) -> ProviderCapabilities:
+    def detect(
+        self,
+        runner: Runner = run_command,
+        *,
+        workdir: Path | None = None,
+    ) -> ProviderCapabilities:
         caps = ProviderCapabilities(self.name, which(self.executable_name))
         if not caps.installed:
             caps.notes.append("`codex` is not on PATH")
             return caps
-        version = _safe(runner, [self.executable_name, "--version"])
-        if version and version.ok:
-            caps.version = _first_line(version.stdout)
-        help_result = _safe(runner, [self.executable_name, "exec", "--help"])
-        if help_result and help_result.ok:
-            caps.features = _flags_in(help_result.stdout, self.feature_flags)
-        auth = _safe(runner, [self.executable_name, "login", "status"])
-        if auth is None or auth.timed_out:
-            caps.auth_detail = "`codex login status` did not complete"
-        else:
-            text = (auth.stdout + auth.stderr).strip()
-            caps.authenticated = (
-                auth.returncode == 0
-                and "logged in" in text.lower()
-                and "not logged in" not in text.lower()
+        try:
+            runtime = CodexRuntime.prepare(workdir)
+            caps.notes.append(f"isolated CODEX_HOME: {runtime.home}")
+            version = _safe(
+                runner, [self.executable_name, "--version"], cwd=runtime.cwd, env=runtime.env
             )
-            caps.auth_detail = text.splitlines()[0] if text else f"exit {auth.returncode}"
-        caps.notes.append(
-            "uses the user's Codex MCP servers and plugins; ForgeFlow cannot disable them per run"
-        )
+            if version and version.ok:
+                caps.version = _first_line(version.stdout)
+            help_result = _safe(
+                runner, [self.executable_name, "exec", "--help"], cwd=runtime.cwd, env=runtime.env
+            )
+            if help_result and help_result.ok:
+                caps.features = _flags_in(help_result.stdout, self.feature_flags)
+            runtime.verify(runner, self._argv0())
+            caps.authenticated = True
+            caps.auth_detail = "authenticated with the isolated Codex profile"
+            caps.notes.append("effective MCP and plugin inventories verified empty")
+        except CodexAuthenticationError as exc:
+            caps.authenticated = False
+            caps.auth_detail = str(exc)
+        except CodexRuntimeError as exc:
+            caps.isolation_error = str(exc)
+            caps.auth_detail = "isolated runtime unavailable"
+            caps.notes.append(str(exc))
         return caps
+
+    def _detect_for_workdir(self, workdir: Path | None) -> ProviderCapabilities:
+        return self.detect(workdir=workdir)
 
     def _workspace_problems(self, role: str, workdir: Path | None) -> list[str]:
         if sys.platform != "win32" or workdir is None or role != "builder":
@@ -618,6 +651,15 @@ class CodexProvider(_CliProvider):
         return [*argv, "-"]  # the prompt comes from stdin
 
     def execute(self, task: ProviderTask, lease: LeaseHandle) -> ProviderResult:
+        # Validate before any CLI probe, including when execute is called directly.
+        task.validate()
+        if lease.job_id != task.job_id or not lease.active:
+            raise ProviderError("the task's job lease is not held")
+        try:
+            runtime = CodexRuntime.prepare(Path(task.worktree_path))
+            runtime.verify(self.runner, self._argv0())
+        except CodexRuntimeError as exc:
+            raise ProviderUnavailableError(str(exc)) from exc
         builder = task.role == "builder"
         prompt = prompts.builder_prompt(task) if builder else prompts.reviewer_prompt(task)
         # Outside the worktree, so they never appear as changes of the build.
@@ -626,11 +668,15 @@ class CodexProvider(_CliProvider):
             schema = None if builder else Path(scratch) / "review-schema.json"
             if schema is not None:
                 schema.write_text(json.dumps(prompts.REVIEW_SCHEMA), encoding="utf-8")
-            result = self._run(task, lease, self.argv(task, last, schema), prompt)
+            result = self._run(task, lease, self.argv(task, last, schema), prompt, env=runtime.env)
             message = last.read_text(encoding="utf-8").strip() if last.is_file() else ""
         events = _jsonl(result.stdout)
         usage = _codex_usage(events)
-        notes = _codex_notes(events)
+        notes = (
+            "Codex configuration isolation verified before execution: independent CODEX_HOME; "
+            "empty MCP/plugin inventories. This is not operating-system isolation.",
+            *_codex_notes(events),
+        )
         refused = [
             line.strip()
             for line in result.stderr.splitlines()
