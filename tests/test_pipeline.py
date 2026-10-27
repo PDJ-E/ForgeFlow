@@ -51,7 +51,7 @@ class HappyPathTests(PipelineTestCase):
 
         def launch(argv: list[str], **kwargs: Any) -> Any:
             if b[2] in argv:
-                starts.append((argv, Path(kwargs["cwd"]), target.exists()))
+                starts.append((argv, Path(kwargs["cwd"]).resolve(), target.exists()))
             return popen(argv, **kwargs)
 
         # Test repositories live in TEMP; model a normal Windows checkout outside TEMP.
