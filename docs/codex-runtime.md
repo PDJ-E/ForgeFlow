@@ -73,6 +73,16 @@ directory or its ancestors. The ordinary user `.codex` source is replaced by
 than bypassed: `/etc/codex` on Linux; `%ProgramData%\OpenAI\Codex` and personal
 `~/.codex/managed_config.toml` on Windows. Unexpected managed-profile settings,
 extensions and linked authentication files block execution without being rewritten.
+
+Codex itself populates `skills/.system/` (plus `.codex-system-skills.marker`) on startup
+and replaces that whole directory whenever its bundled skills change with a release
+(`install_system_skills` in `codex-rs/skills`). ForgeFlow therefore accepts `skills/` only
+when it contains nothing but `.system`, and `.system` only when it holds plain directories
+and unlinked, non-hardlinked files within fixed size bounds, with no stray top-level files.
+User or third-party skills, links/junctions and other shapes are still refused. The content
+is deliberately not pinned (it changes per Codex version, so pinning would make a healthy
+profile invalid after an upgrade), and a skill planted inside `.system` by the same user
+is not detected; that is the same-user limit described below.
 Use a checkout without these configuration sources, or another provider. ForgeFlow
 does not remove repository settings or change organization policy.
 
