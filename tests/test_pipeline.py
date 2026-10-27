@@ -14,6 +14,7 @@ import json
 import subprocess
 import sys
 import unittest
+from pathlib import Path
 from unittest import mock
 
 from forgeflow.errors import InvalidTransitionError, ValidationError
@@ -301,14 +302,28 @@ class HelperTests(PipelineTestCase):
     @unittest.skipUnless(sys.platform == "win32", "Windows ACL inheritance")
     def test_the_review_snapshot_keeps_inherited_permissions(self) -> None:
         """Regression (live run 2026-10-26): a mkdtemp directory has an owner-only ACL on
-        Windows, so Codex's sandbox identity got "Access is denied" reading the snapshot."""
+        Windows, so Codex's sandbox identity got "Access is denied" reading the snapshot.
+
+        The snapshot must get exactly the permissions of an ordinary new directory in the same
+        place (what that is depends on the machine; on the pilot it includes CodexSandboxUsers).
+        """
+        import tempfile
+
         from forgeflow.dispatch import make_snapshot
         from tests.support import rmtree
 
+        def acl(path: Path) -> list[str]:
+            out = subprocess.run(["icacls", str(path)], capture_output=True, text=True).stdout
+            lines = [line.strip() for line in out.splitlines() if ":(" in line]
+            return sorted(line.removeprefix(str(path)).strip() for line in lines)
+
         snapshot = make_snapshot(self.repo, "HEAD")
         self.addCleanup(rmtree, snapshot)
-        acl = subprocess.run(["icacls", str(snapshot)], capture_output=True, text=True).stdout
-        self.assertIn("(I)", acl, acl)
+        ordinary = Path(tempfile.gettempdir()) / f"{snapshot.name}-ordinary"
+        ordinary.mkdir()
+        self.addCleanup(rmtree, ordinary)
+        self.assertTrue(acl(snapshot))
+        self.assertEqual(acl(snapshot), acl(ordinary))
 
     def test_feedback_is_rebuilt_from_the_record(self) -> None:
         job = self.handed_off_job()
