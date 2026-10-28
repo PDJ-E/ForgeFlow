@@ -69,3 +69,7 @@ class ToolNotFoundError(ForgeFlowError):
 
 class ProviderError(ForgeFlowError):
     """A provider is unavailable, misconfigured, or refused a task."""
+
+
+class EvidenceError(ForgeFlowError):
+    """An evidence file is missing, unreadable or does not match its record."""

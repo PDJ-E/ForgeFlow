@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any
 
 from forgeflow import fsutil
-from forgeflow.errors import ForgeFlowError, GitError, ProviderError
+from forgeflow.errors import EvidenceError, ForgeFlowError, GitError, ProviderError
 from forgeflow.gitrepo import git, git_ok, porcelain_status
 from forgeflow.jobs import Evidence, Job, JobState
 from forgeflow.providers import Provider, ProviderResult, ProviderTask
@@ -291,7 +291,10 @@ REVIEW_ACCESS_VERSION = 1
 
 def review_access_verified(store: JobStore, job: Job, evidence: Evidence) -> bool:
     """True only if ForgeFlow itself recorded verified snapshot access for this review."""
-    data = _evidence_payload(store, job, evidence)
+    try:
+        data = store.evidence_payload(job, evidence)
+    except EvidenceError:
+        return False
     record = data.get("review_access")
     return (
         isinstance(record, dict)
@@ -319,15 +322,6 @@ def verified_approval(store: JobStore, job: Job, commit: str | None) -> Evidence
     ):
         return None
     return review
-
-
-def _evidence_payload(store: JobStore, job: Job, evidence: Evidence) -> dict[str, Any]:
-    try:
-        data = fsutil.read_json(store.job_dir(job.job_id) / evidence.path)
-    except (OSError, ValueError):
-        return {}
-    payload = data.get("payload") if isinstance(data, dict) else None
-    return payload if isinstance(payload, dict) else {}
 
 
 def access_proven(result: ProviderResult, token: str) -> bool:

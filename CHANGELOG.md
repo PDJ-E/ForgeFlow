@@ -8,6 +8,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+- Centralize evidence validation in JobStore and report unreadable feedback explicitly.
+  Delivery now stops before pushing when evidence cannot be read.
+- Remove the unused issue-linking adapter; issue ownership uses the canonical store operation.
+
 ### Fixed
 
 - Codex detection no longer times out fetching the account's plugin catalog after

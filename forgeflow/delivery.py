@@ -23,9 +23,8 @@ import platform
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any
 
-from forgeflow import __version__, design, fsutil
+from forgeflow import __version__, design
 from forgeflow.dispatch import latest, passing_checks_for_round, verified_approval
 from forgeflow.errors import GitError, GitHubError, InvalidTransitionError
 from forgeflow.github import GitHubClient, PullRequestSummary
@@ -73,6 +72,7 @@ def deliver(
             "build is never pushed or delivered"
         )
     checks = passing_checks_for_round(job)
+    body = pr_body(store, job, checks.commit or "?")
     if verified_approval(store, job, checks.commit) is None:
         raise InvalidTransitionError(
             "the validated commit has no verified approving review this round (an approval "
@@ -116,7 +116,6 @@ def deliver(
 
     # 4. exactly one draft PR
     title = design.check_text(store.approved_plan_text(job)).title or job.title
-    body = pr_body(store, job, head)
     pr = _existing_pr(client, job, slug, branch)
     if pr is None:
         pr = client.create_draft_pull_request(
@@ -209,15 +208,6 @@ def _round_lines(job: Job) -> list[str]:
     return lines
 
 
-def _payload(store: JobStore, job: Job, kind: str) -> dict[str, Any]:
-    item = latest(job, kind)
-    if item is None:
-        return {}
-    data = fsutil.read_json(store.job_dir(job.job_id) / item.path)
-    payload = data.get("payload") if isinstance(data, dict) else None
-    return payload if isinstance(payload, dict) else {}
-
-
 def _private(text: str, job: Job) -> str:
     """Remove local paths before anything is published."""
     for path in filter(None, (job.worktree.path if job.worktree else None, job.repo.root)):
@@ -228,10 +218,14 @@ def _private(text: str, job: Job) -> str:
 def pr_body(store: JobStore, job: Job, head: str) -> str:
     approval = job.plan.approval
     issue = job.github.issue
-    checks = _payload(store, job, "checks")
-    review = _payload(store, job, "review")
-    build = _payload(store, job, "provider-result")
-    commit = _payload(store, job, "build-commit")
+    checks_record = latest(job, "checks")
+    checks = store.evidence_payload(job, checks_record) if checks_record else {}
+    review_record = latest(job, "review")
+    review = store.evidence_payload(job, review_record) if review_record else {}
+    build_record = latest(job, "provider-result")
+    build = store.evidence_payload(job, build_record) if build_record else {}
+    commit_record = latest(job, "build-commit")
+    commit = store.evidence_payload(job, commit_record) if commit_record else {}
     base = job.worktree.base_sha if job.worktree else "?"
     rows = [
         f"| {c.get('name', ' '.join(c.get('argv', [])))} | "

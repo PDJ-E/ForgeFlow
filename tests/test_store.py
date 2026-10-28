@@ -8,6 +8,7 @@ from forgeflow.errors import (
     ActiveJobError,
     ConcurrencyError,
     DuplicateWorkerError,
+    EvidenceError,
     InvalidTransitionError,
     LeaseError,
     StaleLeaseError,
@@ -19,6 +20,69 @@ from forgeflow.store import JobStore
 from tests.support import FakeGitHub, GitRepoTestCase, pull_request, run_git
 
 S = JobState
+
+
+class EvidencePayloadTests(GitRepoTestCase):
+    def setUp(self) -> None:
+        super().setUp()
+        self.job = self.new_job()
+        self.evidence = self.store.record_evidence(
+            self.job.job_id, "example", "passed", {"detail": "kept"}, mocked=True
+        )
+        self.path = self.store.job_dir(self.job.job_id) / self.evidence.path
+
+    def assert_unreadable(self) -> None:
+        with self.assertRaises(EvidenceError) as ctx:
+            self.store.evidence_payload(self.job, self.evidence)
+        message = str(ctx.exception)
+        self.assertIn(self.evidence.kind, message)
+        self.assertIn(self.evidence.path, message)
+        self.assertNotIn(str(self.store.job_dir(self.job.job_id)), message)
+
+    def change_document(self, **changes: object) -> None:
+        data = json.loads(self.path.read_text(encoding="utf-8"))
+        data.update(changes)
+        self.path.write_text(json.dumps(data), encoding="utf-8")
+        self.assert_unreadable()
+
+    def test_recorded_payload(self) -> None:
+        self.assertEqual(self.store.evidence_payload(self.job, self.evidence), {"detail": "kept"})
+
+    def test_missing_file(self) -> None:
+        self.path.unlink()
+        self.assert_unreadable()
+
+    def test_unreadable_file(self) -> None:
+        from unittest.mock import patch
+
+        with patch("forgeflow.store.fsutil.read_json", side_effect=PermissionError):
+            self.assert_unreadable()
+
+    def test_invalid_json(self) -> None:
+        self.path.write_text("{", encoding="utf-8")
+        self.assert_unreadable()
+
+    def test_non_object_document(self) -> None:
+        self.path.write_text("[]", encoding="utf-8")
+        self.assert_unreadable()
+
+    def test_non_object_payload(self) -> None:
+        self.change_document(payload=[])
+
+    def test_kind_mismatch(self) -> None:
+        self.change_document(kind="other")
+
+    def test_status_mismatch(self) -> None:
+        self.change_document(status="failed")
+
+    def test_mocked_mismatch(self) -> None:
+        self.change_document(mocked=False)
+
+    def test_path_outside_job(self) -> None:
+        from dataclasses import replace
+
+        self.evidence = replace(self.evidence, path="../outside.json")
+        self.assert_unreadable()
 
 
 class CreationAndReadTests(GitRepoTestCase):
@@ -227,15 +291,21 @@ class TransitionGuardTests(GitRepoTestCase):
 
 
 class SingleSlotTests(GitRepoTestCase):
+    def test_one_live_job_per_issue(self) -> None:
+        client = GitHubClient(runner=FakeGitHub({7: "OPEN"}))
+        self.attach_issue(self.approved_job(), 7, client)
+        with self.assertRaisesRegex(ActiveJobError, "already owned"):
+            self.attach_issue(self.approved_job(), 7, client)
+
     def test_only_one_job_may_be_active(self) -> None:
         self.ready_job(issue_number=1)
         second = self.approved_job()
-        from forgeflow.github import GitHubClient, link_issue
+        from forgeflow.github import GitHubClient
         from forgeflow.worktree import WorktreeManager, prepare_job_worktree
         from tests.support import FakeGitHub
 
         prepare_job_worktree(self.store, WorktreeManager(self.repo), second.job_id)
-        link_issue(self.store, second.job_id, 2, GitHubClient(runner=FakeGitHub({2: "OPEN"})))
+        self.attach_issue(second, 2, GitHubClient(runner=FakeGitHub({2: "OPEN"})))
         with self.assertRaisesRegex(ActiveJobError, "execution slot"):
             self.store.transition(second.job_id, S.READY)
 
