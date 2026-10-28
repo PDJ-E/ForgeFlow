@@ -136,14 +136,27 @@ class GitRepoTestCase(unittest.TestCase):
         job = self.store.submit_plan(job.job_id, "docs/plan.md")
         return self.approve(job.job_id)
 
+    def attach_issue(self, job: Job, number: int, client: Any) -> Job:
+        issue = client.view_issue("example/demo", number)
+        items = client.issue_project_items("example/demo", number)
+
+        def apply(j: Job) -> None:
+            j.github.issue = issue
+            j.github.project_items = items
+            j.github.project_lookup = "ok"
+
+        return self.store.update_if_issue_free(
+            job.job_id, "example/demo", number, apply, details={"issue": issue.url}
+        )
+
     def ready_job(self, issue_number: int = 7, **kwargs: str | None) -> Job:
-        from forgeflow.github import GitHubClient, link_issue
+        from forgeflow.github import GitHubClient
         from forgeflow.worktree import WorktreeManager, prepare_job_worktree
 
         job = self.approved_job(**kwargs)
         prepare_job_worktree(self.store, WorktreeManager(self.repo), job.job_id)
         fake = FakeGitHub({issue_number: "OPEN"})
-        link_issue(self.store, job.job_id, issue_number, GitHubClient(runner=fake))
+        self.attach_issue(job, issue_number, GitHubClient(runner=fake))
         return self.store.transition(job.job_id, JobState.READY)
 
     def link_draft_pr(self, job_id: str, number: int = 42) -> Job:

@@ -21,15 +21,11 @@ from typing import Any
 
 from forgeflow.errors import GitHubError, GitHubScopeError, ToolNotFoundError, ValidationError
 from forgeflow.jobs import (
-    TERMINAL_STATES,
     IssueLink,
-    Job,
-    JobState,
     ProjectItemLink,
     PullRequestObservation,
 )
 from forgeflow.proc import CommandResult, Runner, run_command
-from forgeflow.store import JobStore
 
 _ISSUE_QUERY = """
 query($owner: String!, $name: String!, $number: Int!) {
@@ -126,12 +122,6 @@ mutation($id: ID!) {
   convertPullRequestToDraft(input: {pullRequestId: $id}) { pullRequest { isDraft } }
 }
 """
-
-
-@dataclass(frozen=True)
-class LinkResult:
-    job: Job
-    warnings: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -497,52 +487,3 @@ def _parse_graphql(result: CommandResult) -> dict[str, Any]:
     if not isinstance(data, dict):
         raise GitHubError("unexpected response from `gh api graphql`")
     return data
-
-
-_UNAPPROVED = frozenset({JobState.DRAFT, JobState.AWAITING_PLAN_APPROVAL})
-
-
-def link_issue(store: JobStore, job_id: str, number: int, client: GitHubClient) -> LinkResult:
-    """Attach an existing, open issue in the job's repository (and its Project items).
-
-    Only approved work is linked to an issue (Gate A): drafts and plans awaiting approval stay
-    discussion-only.
-    """
-    job = store.load(job_id)
-    if job.state in TERMINAL_STATES or job.state in _UNAPPROVED:
-        raise ValidationError(
-            f"job {job_id} is {job.state.value}; only an approved plan is linked to an issue"
-        )
-    if not job.repo.slug:
-        raise ValidationError("the job's repository has no GitHub remote")
-    issue = client.view_issue(job.repo.slug, number)
-    if issue.state != "OPEN":
-        raise ValidationError(f"{job.repo.slug}#{number} is {issue.state}, not OPEN")
-
-    warnings: list[str] = []
-    items: list[ProjectItemLink] = []
-    try:
-        items = client.issue_project_items(job.repo.slug, number)
-        lookup = "ok" if items else "blocked: issue is not on any GitHub Project"
-        if not items:
-            warnings.append(
-                f"{job.repo.slug}#{number} is not on any GitHub Project; add it to "
-                "the board before execution"
-            )
-    except GitHubScopeError as exc:
-        lookup = f"blocked: token lacks {exc.required_scope}"
-        warnings.append(str(exc))
-
-    def apply(j: Job) -> None:
-        j.github.issue = issue
-        j.github.project_items = items
-        j.github.project_lookup = lookup
-
-    updated = store.update_if_issue_free(
-        job_id,
-        job.repo.slug,
-        number,
-        apply,
-        details={"issue": issue.url, "project_lookup": lookup},
-    )
-    return LinkResult(updated, tuple(warnings))

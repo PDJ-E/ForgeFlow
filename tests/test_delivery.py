@@ -15,7 +15,7 @@ from typing import Any
 from forgeflow.board import BoardListener
 from forgeflow.delivery import deliver
 from forgeflow.dispatch import review_access_verified, run_reviewer, verified_approval
-from forgeflow.errors import GitError, GitHubError, InvalidTransitionError
+from forgeflow.errors import EvidenceError, GitError, GitHubError, InvalidTransitionError
 from forgeflow.jobs import Job, JobState
 from forgeflow.pipeline import checks_summary
 from forgeflow.providers import build_task
@@ -92,6 +92,50 @@ class DeliveryCase(PipelineTestCase):
 
 
 class DeliveryTests(DeliveryCase):
+    def test_corrupt_evidence_stops_before_push(self) -> None:
+        self.reviewed()
+        job = self.store.load(self.job_id)
+        checks = next(e for e in job.evidence if e.kind == "checks")
+        self.assertIn("commands", self.store.evidence_payload(job, checks))
+        (self.store.job_dir(self.job_id) / checks.path).write_text("{", encoding="utf-8")
+        from dataclasses import replace
+
+        from forgeflow.pipeline import feedback_for
+
+        feedback_job = replace(job, evidence=[replace(checks, status="failed")])
+        self.assertIn("could not be read", " ".join(feedback_for(self.store, feedback_job)))
+        summary = checks_summary(self.store, job)
+        self.assertIn("could not be read", summary)
+        self.assertIn(checks.path, summary)
+        self.assertIn("passed", summary)
+        self.store.record_evidence(
+            self.job_id, "human-feedback", "requested", {"note": "keep this feedback"}, mocked=False
+        )
+        feedback_job.evidence.append(self.store.load(self.job_id).evidence[-1])
+        self.assertIn("keep this feedback", " ".join(feedback_for(self.store, feedback_job)))
+        calls = list(self.world.calls)
+        with self.assertRaises(EvidenceError):
+            self.deliver()
+        self.assertEqual(self.world.calls, calls)
+        self.assertEqual(run_git(self.remote, "for-each-ref", "--format=%(refname)"), "")
+        self.assertEqual(self.store.load(self.job_id).state, S.REVIEWING)
+
+    def test_unreadable_review_is_unverified(self) -> None:
+        head = self.reviewed()
+        job = self.store.load(self.job_id)
+        review = next(e for e in job.evidence if e.kind == "review")
+        path = self.store.job_dir(self.job_id) / review.path
+        for corrupt in (True, False):
+            with self.subTest(corrupt=corrupt):
+                if corrupt:
+                    path.write_text("{", encoding="utf-8")
+                else:
+                    path.unlink()
+                self.assertFalse(review_access_verified(self.store, job, review))
+                self.assertIsNone(verified_approval(self.store, job, head))
+                with self.assertRaises(EvidenceError):
+                    self.deliver()
+
     def test_one_push_one_draft_pr_and_gate_b(self) -> None:
         head = self.reviewed()
         job = self.deliver()

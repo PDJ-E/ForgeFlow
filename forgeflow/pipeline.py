@@ -35,9 +35,8 @@ from __future__ import annotations
 import re
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any
 
-from forgeflow import fsutil, repoconfig
+from forgeflow import repoconfig
 from forgeflow.board import BoardListener
 from forgeflow.dispatch import (
     latest,
@@ -48,6 +47,7 @@ from forgeflow.dispatch import (
 )
 from forgeflow.errors import (
     DuplicateWorkerError,
+    EvidenceError,
     ForgeFlowError,
     InvalidTransitionError,
     LeaseError,
@@ -56,7 +56,7 @@ from forgeflow.errors import (
 )
 from forgeflow.github import GitHubClient
 from forgeflow.gitrepo import default_base_ref, resolve_commit
-from forgeflow.jobs import UNASSIGNED_PROVIDER, Evidence, Job, JobState
+from forgeflow.jobs import UNASSIGNED_PROVIDER, Job, JobState
 from forgeflow.providers import REAL_PROVIDERS, Provider, build_task
 from forgeflow.store import JobStore, LeaseHandle
 from forgeflow.worktree import WORKTREES_RELATIVE, WorktreeManager, prepare_job_worktree
@@ -355,7 +355,14 @@ def feedback_for(store: JobStore, job: Job) -> tuple[str, ...]:
     for evidence in job.evidence:
         if evidence.build_round != previous:
             continue
-        payload = _payload(store, job, evidence)
+        try:
+            payload = store.evidence_payload(job, evidence)
+        except EvidenceError:
+            items.append(
+                f"{evidence.kind} evidence for round {previous} at {evidence.path} "
+                "could not be read; details unavailable."
+            )
+            continue
         if evidence.kind == "checks" and evidence.status == "failed":
             for command in payload.get("commands", []):
                 if command.get("ok"):
@@ -384,15 +391,6 @@ def feedback_for(store: JobStore, job: Job) -> tuple[str, ...]:
             f"human let it continue and said: {note or '(nothing)'}"
         )
     return tuple(items)
-
-
-def _payload(store: JobStore, job: Job, evidence: Evidence) -> dict[str, Any]:
-    try:
-        data = fsutil.read_json(store.job_dir(job.job_id) / evidence.path)
-    except (OSError, ValueError):
-        return {}
-    payload = data.get("payload") if isinstance(data, dict) else None
-    return payload if isinstance(payload, dict) else {}
 
 
 def _last_reason(store: JobStore, job: Job, event: str) -> str:
@@ -441,8 +439,12 @@ def checks_summary(store: JobStore, job: Job) -> str:
     checks = latest(job, "checks")
     if checks is None:
         return ""
-    payload = _payload(store, job, checks)
     lines = [f"Commit {checks.commit}: {checks.status} (real run by ForgeFlow, not mocked)"]
+    try:
+        payload = store.evidence_payload(job, checks)
+    except EvidenceError:
+        lines.append(f"Evidence {checks.path} could not be read; command details unavailable.")
+        return "\n".join(lines)
     for command in payload.get("commands", []):
         lines.append(
             f"- {command.get('name') or ' '.join(command.get('argv', []))}: "

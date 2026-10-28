@@ -3,10 +3,10 @@ from __future__ import annotations
 import os
 import unittest
 
-from forgeflow.errors import ActiveJobError, GitHubError, GitHubScopeError, ValidationError
-from forgeflow.github import GitHubClient, link_issue
+from forgeflow.errors import GitHubError, GitHubScopeError
+from forgeflow.github import GitHubClient
 from forgeflow.gitrepo import github_slug_from_remote
-from tests.support import FakeGitHub, GitRepoTestCase
+from tests.support import FakeGitHub
 
 
 class RemoteParsingTests(unittest.TestCase):
@@ -25,49 +25,26 @@ class RemoteParsingTests(unittest.TestCase):
         self.assertIsNone(github_slug_from_remote("https://gitlab.com/a/b.git"))
 
 
-class LinkIssueTests(GitRepoTestCase):
-    def test_links_open_issue_and_project_item(self) -> None:
-        job = self.approved_job()
+class IssueClientTests(unittest.TestCase):
+    def test_open_issue_and_project_item(self) -> None:
         fake = FakeGitHub({7: "OPEN"})
-        result = link_issue(self.store, job.job_id, 7, GitHubClient(runner=fake))
-        gh = result.job.github
-        assert gh.issue is not None
-        self.assertEqual((gh.issue.repo, gh.issue.number), ("example/demo", 7))
-        self.assertEqual(gh.project_lookup, "ok")
-        self.assertEqual(gh.project_items[0].status, "Todo")
-        self.assertEqual(result.warnings, ())
-        # Read-only: only GraphQL queries were issued, never a mutation.
+        client = GitHubClient(runner=fake)
+        issue = client.view_issue("example/demo", 7)
+        self.assertEqual((issue.repo, issue.number, issue.state), ("example/demo", 7, "OPEN"))
+        self.assertEqual(client.issue_project_items("example/demo", 7)[0].status, "Todo")
         self.assertTrue(all("mutation" not in " ".join(c) for c in fake.calls))
 
-    def test_missing_project_scope_is_a_visible_blocker(self) -> None:
-        job = self.approved_job()
-        fake = FakeGitHub({7: "OPEN"}, project_scope=False)
-        result = link_issue(self.store, job.job_id, 7, GitHubClient(runner=fake))
-        self.assertEqual(result.job.github.project_lookup, "blocked: token lacks read:project")
-        self.assertIn("gh auth refresh -s read:project", result.warnings[0])
-
-    def test_issue_not_on_a_project_is_reported(self) -> None:
-        job = self.approved_job()
-        fake = FakeGitHub({7: "OPEN"}, project_items=[])
-        result = link_issue(self.store, job.job_id, 7, GitHubClient(runner=fake))
-        self.assertTrue(result.job.github.project_lookup.startswith("blocked"))
-
-    def test_rejects_closed_issue_and_non_issue(self) -> None:
-        job = self.approved_job()
+    def test_closed_issue(self) -> None:
         client = GitHubClient(runner=FakeGitHub({7: "CLOSED"}))
-        with self.assertRaises(ValidationError):
-            link_issue(self.store, job.job_id, 7, client)
-        with self.assertRaises(GitHubError):
-            link_issue(self.store, job.job_id, 99, client)
-        self.assertIsNone(self.store.load(job.job_id).github.issue)
+        self.assertEqual(client.view_issue("example/demo", 7).state, "CLOSED")
 
-    def test_one_live_job_per_issue(self) -> None:
-        first = self.approved_job()
-        client = GitHubClient(runner=FakeGitHub({7: "OPEN"}))
-        link_issue(self.store, first.job_id, 7, client)
-        second = self.approved_job()
-        with self.assertRaisesRegex(ActiveJobError, "already owned"):
-            link_issue(self.store, second.job_id, 7, client)
+    def test_missing_issue(self) -> None:
+        with self.assertRaises(GitHubError):
+            GitHubClient(runner=FakeGitHub({})).view_issue("example/demo", 99)
+
+    def test_no_project(self) -> None:
+        client = GitHubClient(runner=FakeGitHub({7: "OPEN"}, project_items=[]))
+        self.assertEqual(client.issue_project_items("example/demo", 7), [])
 
     def test_scope_error_type(self) -> None:
         client = GitHubClient(runner=FakeGitHub({7: "OPEN"}, project_scope=False))

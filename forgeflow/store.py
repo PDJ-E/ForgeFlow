@@ -52,6 +52,7 @@ from forgeflow.errors import (
     ActiveJobError,
     ConcurrencyError,
     DuplicateWorkerError,
+    EvidenceError,
     ForgeFlowError,
     InvalidTransitionError,
     LeaseError,
@@ -1031,6 +1032,27 @@ class JobStore:
             return self._mutate_locked(job_id, guarded, "issue-linked", details, None)
 
     # --- evidence --------------------------------------------------------------------------
+
+    def evidence_payload(self, job: Job, evidence: Evidence) -> dict[str, Any]:
+        """Read and validate an evidence document without exposing local paths."""
+        root = self.job_dir(job.job_id)
+        label = evidence.path if not Path(evidence.path).is_absolute() else Path(evidence.path).name
+        message = f"{evidence.kind} evidence {label} could not be read"
+        try:
+            path = fsutil.ensure_within(root, root / evidence.path)
+            data = fsutil.read_json(path)
+        except (OSError, ValueError, ValidationError):
+            raise EvidenceError(message) from None
+        if (
+            not isinstance(data, dict)
+            or data.get("kind") != evidence.kind
+            or data.get("status") != evidence.status
+            or type(data.get("mocked")) is not bool
+            or data.get("mocked") != evidence.mocked
+            or not isinstance(data.get("payload"), dict)
+        ):
+            raise EvidenceError(message)
+        return dict(data["payload"])
 
     def record_evidence(
         self,
