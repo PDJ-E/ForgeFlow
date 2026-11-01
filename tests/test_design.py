@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 
-from forgeflow import design, discovery
+from forgeflow import design, discovery, pipeline
 from forgeflow.errors import InvalidTransitionError, ValidationError
 from forgeflow.jobs import IssueLink, Job, JobState
 from tests.support import GitRepoTestCase
@@ -49,13 +49,31 @@ None.
 
 Change main.py.
 
+- **Files:** `main.py`,
+  `tests/test_main.py`
 - [ ] greet() prints hello
 - [ ] main() calls greet()
 
 ### T2: Document it
 
+- Files: README.md
 - [ ] README mentions the greeting
 """
+# Approved before plans needed a Files: line per task.
+LEGACY_PLAN = VALID_PLAN.replace("- **Files:** `main.py`,\n  `tests/test_main.py`\n", "").replace(
+    "- Files: README.md\n", ""
+)
+
+
+def sized_plan(*tasks: tuple[int, int]) -> str:
+    """VALID_PLAN with its tasks replaced by (criteria, files) tasks."""
+    head = VALID_PLAN.split("### T1")[0]
+    body = ""
+    for n, (criteria, files) in enumerate(tasks, start=1):
+        paths = ", ".join(f"`src/f{i}.py`" for i in range(files))
+        checks = "".join(f"- [ ] criterion {i}\n" for i in range(criteria))
+        body += f"### T{n}: Task {n}\n\n- **Files:** {paths}\n{checks}\n"
+    return head + body
 
 
 class PlanCheckTests(GitRepoTestCase):
@@ -65,6 +83,52 @@ class PlanCheckTests(GitRepoTestCase):
         self.assertEqual(result.warnings, [])
         self.assertEqual(result.title, "Greeting on start-up")
         self.assertEqual([(t.id, t.criteria) for t in result.tasks], [("T1", 2), ("T2", 1)])
+        self.assertEqual([t.files for t in result.tasks], [2, 1])
+        self.assertIn("  T1: Add greet() (2 criteria, 2 files)", result.summary_lines())
+
+    def test_size_contract_at_and_just_over_each_limit(self) -> None:
+        n, c, f = design.MAX_TASKS, design.MAX_CRITERIA_PER_TASK, design.MAX_FILES_PER_TASK
+        self.assertEqual(design.check_text(sized_plan(*[(c, f)] * n)).errors, [])
+        over = {
+            f"{n + 1} tasks": sized_plan(*[(1, 1)] * (n + 1)),
+            f"{c + 1} acceptance criteria": sized_plan((c + 1, 1)),
+            f"lists {f + 1} files": sized_plan((1, f + 1)),
+            "T2 has no 'Files:' line": LEGACY_PLAN,
+        }
+        for expected, text in over.items():
+            with self.subTest(expected):
+                self.assertTrue(any(expected in e for e in design.check_text(text).errors))
+
+    def test_files_lines_are_counted_as_written(self) -> None:
+        def count(files_line: str) -> list[int]:
+            text = VALID_PLAN.replace("- Files: README.md\n", files_line)
+            return [t.files for t in design.check_text(text).tasks]
+
+        cases = {
+            "- Files: `a.py`, b.py, c.py\n": 3,  # mixed: every entry counts
+            "- **Files:** `a.py`\n  - [ ] uses `b.py`, `c.py`\n  - [ ] and `d.py`\n": 1,
+            "- **Files:** `a.py`,\n  `b.py`\n- [ ] more\n": 2,  # continuation line
+        }
+        for line, expected in cases.items():
+            with self.subTest(line):
+                self.assertEqual(count(line)[1], expected)
+        for empty in ("- **Files:**\n", "Files:   \n"):
+            with self.subTest(empty):
+                errors = design.check_text(VALID_PLAN.replace("- Files: README.md\n", empty)).errors
+                self.assertTrue(any("T2 has no 'Files:' line" in e for e in errors), errors)
+
+    def test_a_large_plan_is_a_warning_below_the_hard_limit(self) -> None:
+        def padded(size: int) -> str:
+            return VALID_PLAN.replace("Only the greeting.", "x" * (size - len(VALID_PLAN) + 18))
+
+        at, over = padded(design.PLAN_SIZE_WARNING), padded(design.PLAN_SIZE_WARNING + 1)
+        limit = design.PLAN_SIZE_WARNING
+        self.assertEqual((len(at), len(over)), (limit, limit + 1))
+        self.assertFalse(any("characters" in w for w in design.check_text(at).warnings))
+        result = design.check_text(over)
+        self.assertTrue(result.ok)
+        self.assertTrue(any("split" in w for w in result.warnings))
+        self.assertLess(design.PLAN_SIZE_WARNING, design.MAX_PLAN_CHARS)
 
     def test_structural_errors(self) -> None:
         cases = {
@@ -195,6 +259,23 @@ class DesignWorkflowTests(GitRepoTestCase):
         self.store.update(job_id, link, event="issue-linked")
         with self.assertRaisesRegex(InvalidTransitionError, "already handed off"):
             design.revise(self.store, job_id, "too late")
+
+    def test_an_approved_plan_without_files_lines_still_loads_and_displays(self) -> None:
+        job_id = self.draft()
+        self.write_plan(job_id, LEGACY_PLAN)
+        # Submitted and approved before the size contract existed (submit would now refuse it).
+        self.store.submit_plan(job_id, design.plan_relpath(job_id))
+        job = self.approve(job_id)
+        text = self.store.approved_plan_text(job)
+        self.assertEqual(text, LEGACY_PLAN)
+        shown = design.check_text(text)
+        self.assertEqual(shown.title, "Greeting on start-up")
+        self.assertIn("  T2: Document it (1 criteria, 0 files)", shown.summary_lines())
+        self.assertEqual(
+            pipeline.acceptance_criteria(text, "x"),
+            ("hello is printed once", "greet() prints hello", "main() calls greet()",
+             "README mentions the greeting"),
+        )  # fmt: skip
 
     def test_scaffold_only_in_draft(self) -> None:
         job_id = self.draft()

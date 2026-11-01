@@ -101,7 +101,7 @@ py -3.13 -m forgeflow idea show <job> --all
 
 ### 3. Design the plan
 
-`/forge design <job>` (or `forgeflow design new <job>`) creates **one** plan file, `.forge/runtime/jobs/<job>/plan.md`, prefilled from the discovery. Edit it with the agent, which uses the Engineering skills when available. `forgeflow design check <job>` lists what is missing. When you are content: `forgeflow design submit <job>` pins those exact bytes as plan version *n*. Changing your mind later: `forgeflow design revise <job> --reason "..."`, then submit again (a new version).
+`/forge design <job>` (or `forgeflow design new <job>`) creates **one** plan file, `.forge/runtime/jobs/<job>/plan.md`, prefilled from the discovery. Edit it with the agent, which uses the Engineering skills when available. `forgeflow design check <job>` lists what is missing. Each `### T<n>` task needs a `Files:` line, and a job is kept small enough to build and review: more than 6 tasks, more than 6 acceptance criteria in a task or more than 8 files in a task is an error, and a plan over 16,000 characters gets a warning. Larger work is split into separate jobs before approval. Plans approved before these limits still load and display. When you are content: `forgeflow design submit <job>` pins those exact bytes as plan version *n*. Changing your mind later: `forgeflow design revise <job> --reason "..."`, then submit again (a new version).
 
 The approved plan is published **verbatim** as the issue body. Keep private notes in the discovery, which never leaves your machine.
 

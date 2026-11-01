@@ -34,6 +34,11 @@ PLAN_NAME = "plan.md"
 # GitHub rejects issue bodies over 65,536 characters; the trace footer needs the rest.
 MAX_PLAN_CHARS = 60_000
 TODO_MARK = "TODO(forgeflow)"
+# Plan size contract (ADR 0006 §5): oversized work is split into jobs before Gate A.
+MAX_TASKS = 6
+MAX_CRITERIA_PER_TASK = 6
+MAX_FILES_PER_TASK = 8
+PLAN_SIZE_WARNING = 16_000  # characters; well under MAX_PLAN_CHARS
 
 REQUIRED_SECTIONS = (
     "Problem and objective",
@@ -54,6 +59,11 @@ _H2 = re.compile(r"^## (?!#)(.+?)\s*$", re.MULTILINE)
 _TASK = re.compile(r"^### (T\d+)\s*[:.\-—]\s*(.+?)\s*$", re.MULTILINE)
 _H3 = re.compile(r"^### ", re.MULTILINE)
 _CRITERION = re.compile(r"^\s*[-*] \[ \] \S", re.MULTILINE)
+# "- **Files:** `a.py`, `b.py`" or "Files: a.py, b.py", continued on indented lines.
+_FILES = re.compile(
+    r"^\s*(?:[-*]\s+)?\*{0,2}Files:\*{0,2}(.*(?:\n(?![ \t]*[-*] )[ \t]+.*)*)", re.MULTILINE
+)
+_BACKTICKED = re.compile(r"`[^`\n]+`")
 # "Project #2", "GitHub Project ForgeFlow Development #2": GitHub links "#2" to issue/PR 2.
 _PROJECT_NUMBER = re.compile(r"(?i)\bprojects?\b[^\n#`]{0,40}#\d+")
 # A POSIX home path counts only where it starts a token, so github.com/users/x/ does not match.
@@ -67,6 +77,7 @@ class Task:
     id: str
     title: str
     criteria: int
+    files: int = 0  # entries on its Files: line; 0 when it has none
 
 
 @dataclass
@@ -83,7 +94,9 @@ class PlanCheck:
 
     def summary_lines(self) -> list[str]:
         lines = [f"Tasks        {len(self.tasks)}"]
-        lines += [f"  {t.id}: {t.title} ({t.criteria} criteria)" for t in self.tasks]
+        lines += [
+            f"  {t.id}: {t.title} ({t.criteria} criteria, {t.files} files)" for t in self.tasks
+        ]
         return lines
 
 
@@ -141,9 +154,26 @@ def check_text(text: str) -> PlanCheck:
         criteria = len(_CRITERION.findall(chunk))
         if not criteria:
             result.errors.append(f"task {task_id} has no '- [ ]' acceptance criterion")
-        result.tasks.append(Task(task_id, title, criteria))
+        elif criteria > MAX_CRITERIA_PER_TASK:
+            result.errors.append(
+                f"task {task_id} has {criteria} acceptance criteria; at most "
+                f"{MAX_CRITERIA_PER_TASK}: split the task"
+            )
+        files = _files(chunk)
+        if files is None:
+            result.errors.append(f"task {task_id} has no 'Files:' line (the files it changes)")
+        elif files > MAX_FILES_PER_TASK:
+            result.errors.append(
+                f"task {task_id} lists {files} files; at most {MAX_FILES_PER_TASK}: split the task"
+            )
+        result.tasks.append(Task(task_id, title, criteria, files or 0))
     if any(k.startswith("tasks") for k in keys) and not result.tasks:
         result.errors.append("'## Tasks' has no '### T<n>: <title>' task")
+    if len(result.tasks) > MAX_TASKS:
+        result.errors.append(
+            f"the plan has {len(result.tasks)} tasks; at most {MAX_TASKS} per job: split the "
+            "work into separate jobs"
+        )
 
     if TODO_MARK in text:
         result.errors.append(f"unresolved {TODO_MARK} placeholders remain")
@@ -151,6 +181,11 @@ def check_text(text: str) -> PlanCheck:
         result.errors.append(
             f"the plan is {len(text)} characters; GitHub issue bodies allow about "
             f"{MAX_PLAN_CHARS}. Shorten it or split the work into separate jobs"
+        )
+    if PLAN_SIZE_WARNING < len(text) <= MAX_PLAN_CHARS:
+        result.warnings.append(
+            f"the plan is {len(text)} characters (over {PLAN_SIZE_WARNING}); consider whether "
+            "to split it into smaller jobs"
         )
     if _LOCAL_PATH.search(text):
         result.warnings.append(
@@ -163,6 +198,18 @@ def check_text(text: str) -> PlanCheck:
             "repository, not to a Project; name the Project and link its URL instead"
         )
     return result
+
+
+def _files(chunk: str) -> int | None:
+    """How many files a task's Files: line names: backticked paths or comma-separated entries,
+    whichever is more. ``None`` when it has no such line or the line names nothing."""
+    match = _FILES.search(chunk)
+    if match is None:
+        return None
+    listed = match.group(1)
+    quoted = len(_BACKTICKED.findall(listed))
+    entries = len([p for p in listed.split(",") if p.strip()])
+    return max(quoted, entries) or None
 
 
 def _bullets(items: list[str], placeholder: str) -> str:
@@ -245,6 +292,7 @@ architecture and ADRs
 
 {TODO_MARK}: what to change, where, and how it is verified.
 
+- **Files:** {TODO_MARK}: the files this task changes (at most {MAX_FILES_PER_TASK})
 - [ ] {TODO_MARK}: acceptance criterion
 """
 

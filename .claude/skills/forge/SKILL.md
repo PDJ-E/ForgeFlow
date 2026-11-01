@@ -70,8 +70,11 @@ alternative; state what is out of scope.
    (for example spec writing, system design, architecture, testing strategy) to strengthen the
    solution, trade-offs, risks and verification. Read the repository's existing docs and ADRs.
 3. Fill the plan with the user: replace every `TODO(forgeflow)` placeholder; keep required
-   sections; each `### T<n>: <title>` task needs `- [ ]` acceptance criteria. Show the user the
-   changes and revise until they are content. Run `design check` and fix what it reports.
+   sections; each `### T<n>: <title>` task needs `- [ ]` acceptance criteria and a `Files:` line
+   listing the files it changes. Keep each job small: at most 6 tasks, 6 criteria per task and
+   8 files per task. Work that does not fit is split into separate jobs now, not at build time.
+   Show the user the changes and revise until they are content. Run `design check` and fix
+   what it reports.
 4. Submit only when the user says it is ready: `python -m forgeflow design submit <job>`.
    The approved plan is published verbatim to GitHub, so keep private notes out of it.
 
