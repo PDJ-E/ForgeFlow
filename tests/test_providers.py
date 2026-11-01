@@ -28,6 +28,7 @@ from forgeflow.providers import (
     UsageReport,
     _StreamLog,
     build_task,
+    builder_commands,
     interpret_review,
     validate_policy,
 )
@@ -311,16 +312,46 @@ class ExecutionTests(unittest.TestCase):
         argv = start["argv"]
         for flag in ("-p", "--restricted", "--strict-mcp-config", "--no-session-persistence"):
             self.assertIn(flag, argv)
-        self.assertEqual(argv[argv.index("--tools") + 1], "Read,Edit,Write,Glob,Grep")
-        self.assertEqual(argv[argv.index("--permission-mode") + 1], "acceptEdits")
+        self.assertEqual(argv[argv.index("--tools") + 1], "Read,Edit,Write,Glob,Grep,Bash")
+        self.assertEqual(argv[argv.index("--permission-mode") + 1], "dontAsk")
         self.assertEqual(argv[argv.index("--permission-prompts") + 1], "none")
         self.assertEqual(argv[argv.index("--output-format") + 1], "stream-json")
         self.assertIn("--verbose", argv)
-        self.assertNotIn("Bash", " ".join(argv))
         self.assertIn("# Plan", start["prompt"], "the approved plan travels on stdin")
         self.assertEqual(self.lease.pids, [start["pid"], None])
         self.assertEqual(result.telemetry["turns"], 2)
         self.assertEqual(result.telemetry["tools_used"], {"Write": 1})
+
+    def test_the_claude_builder_may_run_only_the_exact_checks_and_read_only_git(self) -> None:
+        python = r"C:\Py 3\python.exe"  # a space and backslashes: POSIX-quoted, as typed in Bash
+        checks = ((python, "-m", "unittest", "discover"), ("ruff", "check", "."))
+        command = self.cli("claude", {"writes": {"src/a.py": "x\n"}})
+        self.execute(ClaudeCodeProvider(command=command), self.task(validation_commands=checks))
+        argv = self.log(command)[0]["argv"]
+        start = argv.index("--allowedTools") + 1
+        end = next((i for i in range(start, len(argv)) if argv[i].startswith("--")), len(argv))
+        self.assertEqual(
+            argv[start:end],
+            ["Read", "Edit", "Write", "Glob", "Grep",
+             f"Bash('{python}' -m unittest discover)", "Bash(ruff check .)",
+             "Bash(git status)", "Bash(git diff)"],
+        )  # fmt: skip
+        self.assertEqual(argv.count("--allowedTools"), 1)
+        self.assertNotIn("--disallowedTools", argv)
+        self.assertNotIn("--dangerously-skip-permissions", argv)
+        self.assertEqual(argv[argv.index("--permission-mode") + 1], "dontAsk")
+        self.assertEqual(builder_commands(checks)[0], f"'{python}' -m unittest discover")
+        # The reviewer's invocation is unchanged: read-only tools, no shell, no allow rules.
+        review = self.cli("claude", {"review": {"verdict": "approve", "summary": "ok",
+                                                "findings": []}})  # fmt: skip
+        task = self.task(role="reviewer", allowed_operations=("read",), review_commit="a" * 40,
+                         validation_commands=checks)  # fmt: skip
+        self.execute(ClaudeCodeProvider(command=review), task)
+        reviewer = self.log(review)[0]["argv"]
+        self.assertEqual(reviewer[reviewer.index("--tools") + 1], "Read,Glob,Grep")
+        self.assertEqual(reviewer[reviewer.index("--permission-mode") + 1], "dontAsk")
+        self.assertNotIn("--allowedTools", reviewer)
+        self.assertNotIn("Bash", " ".join(reviewer))
 
     def test_claude_stream_is_written_incrementally_redacted_and_bounded(self) -> None:
         stream = self.dir / "evidence" / "stream-builder.jsonl"

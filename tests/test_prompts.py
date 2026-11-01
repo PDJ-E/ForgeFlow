@@ -63,6 +63,19 @@ class BuilderPromptTests(unittest.TestCase):
         with self.assertRaisesRegex(ValidationError, "no task T9"):
             replace(task, task_id="T9").validate()
 
+    def test_the_builder_is_told_to_run_the_checks_exactly_as_written(self) -> None:
+        python = r"C:\Py 3\python.exe"
+        checks = ((python, "-m", "unittest"), ("ruff", "check", "."))
+        for task_id in ("", "T1"):
+            prompt = prompts.builder_prompt(
+                task_for(VALID_PLAN, task_id=task_id, validation_commands=checks)
+            )
+            self.assertIn(f"- '{python}' -m unittest\n- ruff check .\n", prompt)
+            self.assertIn("after each change the narrowest of them that covers it", prompt)
+            self.assertIn("all of them before you finish", prompt)
+            self.assertIn("except `git status` and `git diff`", prompt)
+            self.assertIn("ForgeFlow still runs them itself afterwards", prompt)
+
     def test_without_a_task_the_prompt_carries_the_whole_plan(self) -> None:
         prompt = prompts.builder_prompt(task_for(VALID_PLAN))
         self.assertIn(VALID_PLAN.rstrip(), prompt)

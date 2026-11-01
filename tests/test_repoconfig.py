@@ -9,6 +9,7 @@ import sys
 import unittest
 
 from forgeflow.errors import ValidationError
+from forgeflow.providers import ProviderTask
 from forgeflow.repoconfig import (
     DEFAULT_MAX_BUDGET_USD,
     DEFAULT_MAX_TURNS,
@@ -43,6 +44,21 @@ class ParseTests(unittest.TestCase):
         self.assertEqual(config.check_timeout, 30)
         self.assertEqual(config.allowed_paths, ("src/*", "tests/*"))
         self.assertEqual(config.protected_paths, DEFAULT_PROTECTED_PATHS)
+
+    def test_agent_files_are_protected_by_default(self) -> None:
+        config = parse(GOOD)
+        task = ProviderTask(
+            job_id="ff-20261101-abcdef", role="builder", repo_slug=None, worktree_path="w",
+            branch="b", base_sha="0" * 40, plan_path="p", plan_sha256="", plan_text="",
+            acceptance_criteria=("x",), allowed_paths=("*",), allowed_operations=("read",),
+            validation_commands=(), protected_paths=config.protected_paths,
+        )  # fmt: skip
+        for path in (".claude/settings.json", ".claude/hooks/stop.sh", ".agents/skills/x.md",
+                     "CLAUDE.md", "AGENTS.md", ".forge/forgeflow.toml",
+                     ".github/workflows/ci.yml"):  # fmt: skip
+            self.assertTrue(task.is_protected(path), path)
+        for path in ("src/CLAUDE.md.txt", "docs/AGENTS.md", "README.md"):
+            self.assertFalse(task.is_protected(path), path)
 
     def test_budgets_default_and_parse(self) -> None:
         config = parse(GOOD)

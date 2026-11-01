@@ -37,8 +37,16 @@ from forgeflow.proc import Runner, run_command
 CONFIG_PATH = ".forge/forgeflow.toml"
 DEFAULT_CHECK_TIMEOUT = 600
 DEFAULT_ALLOWED_PATHS = ("*",)
-# The check configuration and CI definitions decide what "validated" means.
-DEFAULT_PROTECTED_PATHS = (".forge/*", ".github/workflows/*")
+# The check configuration and CI definitions decide what "validated" means. Agent files decide
+# what a later session loads (ADR 0006 §7): a builder must not plant instructions or hooks.
+DEFAULT_PROTECTED_PATHS = (
+    ".forge/*",
+    ".github/workflows/*",
+    ".claude/*",
+    ".agents/*",
+    "CLAUDE.md",
+    "AGENTS.md",
+)
 # Per provider invocation (ADR 0006 §4). A limit is reached as a run status, never retried.
 DEFAULT_MAX_TURNS = 100
 DEFAULT_MAX_BUDGET_USD = 5.0

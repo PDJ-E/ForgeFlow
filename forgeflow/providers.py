@@ -4,11 +4,13 @@ Detection (executables, versions, auth status and CLI options parsed from ``--he
 execution are real. The invocations below were verified against the installed CLIs (Claude
 Code 2.1.311, Codex CLI 0.164.0, Windows 11) before they were written; see ADR 0005.
 
-* **Claude Code builder:** ``claude -p --restricted --tools Read,Edit,Write,Glob,Grep
-  --permission-mode acceptEdits --permission-prompts none --strict-mcp-config``. It has no
-  command-running tool at all, its file tools are confined to the worktree (a write outside is
-  denied and reported in ``permission_denials``), and user/project settings, hooks, MCP
-  servers, ``CLAUDE.md`` and project agents/skills are not loaded (re-probed on 2.1.316).
+* **Claude Code builder:** ``claude -p --restricted --tools Read,Edit,Write,Glob,Grep,Bash
+  --permission-mode dontAsk --allowedTools <file tools> Bash(<check>)... --permission-prompts
+  none --strict-mcp-config``. Its Bash runs only the exact configured checks, ``git status``
+  and ``git diff`` (plus Claude Code's own read-only commands); everything else is refused
+  (see ``builder_commands`` and ADR 0005). Its file tools are confined to the worktree (a write
+  outside is denied and reported in ``permission_denials``), and user/project settings, hooks,
+  MCP servers, ``CLAUDE.md`` and project agents/skills are not loaded (re-probed on 2.1.316).
 * **Claude Code reviewer:** the same with ``--tools Read,Glob,Grep --permission-mode dontAsk``
   and ``--json-schema`` (the answer arrives in ``structured_output``).
 * **Codex builder:** ``codex exec -s workspace-write -C <worktree>``; **reviewer:** ``-s
@@ -33,6 +35,7 @@ import json
 import os
 import re
 import secrets
+import shlex
 import sys
 import tempfile
 import time
@@ -436,6 +439,18 @@ class _CliProvider(Provider):
         )
 
 
+_FILE_TOOLS = ("Read", "Edit", "Write", "Glob", "Grep")  # confined to the worktree by --restricted
+BUILDER_GIT_COMMANDS = ("git status", "git diff")
+
+
+def builder_commands(checks: Sequence[Sequence[str]]) -> tuple[str, ...]:
+    """The exact shell commands a Claude builder may run (ADR 0006 §3): each configured check
+    as one POSIX-quoted line (Claude Code's Bash tool is a POSIX shell, Git Bash on Windows),
+    plus ``git status`` and ``git diff`` without arguments. Claude Code itself also lets its own
+    read-only commands through (ls, git log, ...); see ADR 0005."""
+    return (*(shlex.join(argv) for argv in checks), *BUILDER_GIT_COMMANDS)
+
+
 class ClaudeCodeProvider(_CliProvider):
     name = "claude"
     executable_name = "claude"
@@ -469,8 +484,11 @@ class ClaudeCodeProvider(_CliProvider):
         "--permission-prompts",
         "--no-session-persistence",
     )
-    role_flags = {"builder": _common_flags, "reviewer": (*_common_flags, "--json-schema")}
-    builder_tools = "Read,Edit,Write,Glob,Grep"
+    role_flags = {
+        "builder": (*_common_flags, "--allowedTools"),
+        "reviewer": (*_common_flags, "--json-schema"),
+    }
+    builder_tools = "Read,Edit,Write,Glob,Grep,Bash"
     reviewer_tools = "Read,Glob,Grep"
 
     def detect(self, runner: Runner = run_command) -> ProviderCapabilities:
@@ -513,7 +531,17 @@ class ClaudeCodeProvider(_CliProvider):
             "none",
         ]
         if task.role == "builder":
-            argv += ["--tools", self.builder_tools, "--permission-mode", "acceptEdits"]
+            # dontAsk refuses every tool use no rule allows (ADR 0006 §3): Bash runs only the
+            # exact configured checks plus read-only git; acceptEdits would also let it write.
+            argv += [
+                "--tools",
+                self.builder_tools,
+                "--permission-mode",
+                "dontAsk",
+                "--allowedTools",
+                *_FILE_TOOLS,
+                *(f"Bash({command})" for command in builder_commands(task.validation_commands)),
+            ]
         else:
             argv += [
                 "--tools",
