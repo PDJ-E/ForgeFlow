@@ -21,12 +21,13 @@ Every flag below was checked against the installed CLIs (Claude Code 2.1.311 and
 
 | Role | Claude Code | Codex CLI |
 | --- | --- | --- |
-| Builder | `claude -p --output-format json --no-session-persistence --restricted --strict-mcp-config --permission-prompts none --tools Read,Edit,Write,Glob,Grep --permission-mode acceptEdits` | `codex exec --json --ephemeral -C <worktree> -s workspace-write -c approval_policy="never" -o <file> -` |
+| Builder | `claude -p --output-format stream-json --verbose --no-session-persistence --restricted --strict-mcp-config --permission-prompts none --tools Read,Edit,Write,Glob,Grep,Bash --permission-mode dontAsk --allowedTools Read Edit Write Glob Grep Bash(<check>)… Bash(git status) Bash(git diff)` (since harness v2b; before it `--tools Read,Edit,Write,Glob,Grep --permission-mode acceptEdits`, no shell) | `codex exec --json --ephemeral -C <worktree> -s workspace-write -c approval_policy="never" -o <file> -` |
 | Reviewer | the same with `--tools Read,Glob,Grep --permission-mode dontAsk --json-schema <schema>` | `-s read-only --output-schema <file> --skip-git-repo-check` |
 
 What the probes showed:
 
-- **Claude builder:** a write inside the working directory succeeds; a write to `..\outside` is denied and listed in `permission_denials`. With `--restricted` and no Bash tool the builder cannot run commands at all, and user, project and local settings, hooks and (with `--strict-mcp-config`) MCP servers are not loaded.
+- **Claude builder:** a write inside the working directory succeeds; a write to `..\outside` is denied and listed in `permission_denials`. User, project and local settings, hooks and (with `--strict-mcp-config`) MCP servers are not loaded.
+- **Claude builder's shell (probed 2026-11-01, Claude Code 2.1.316, Windows 11, Git Bash; harness v2b, [ADR 0006 §3](0006-task-scoped-execution-harness.md)):** each configured check is one `Bash(<argv POSIX-quoted with shlex.join>)` rule, plus `Bash(git status)` and `Bash(git diff)`. The exact check ran (also with `(`, `)`, nested quotes and commas in its argv); the same check with the path unquoted was refused. Under `dontAsk` all 28 other commands tried were refused with "Permission to use Bash has been denied because Claude Code is running in don't ask mode", and the scratch repository was unchanged afterwards (no new file, nothing staged, one branch, one commit, no stash, no `user.name`): `touch`, `mkdir`, `cp`, `mv`, `rm`, `sed -i`, `echo > f`, `echo >> f`, `cat f > g`, `echo | tee f`, `printf | dd of=f`, `git diff --output=f`, `git diff HEAD > f`, `git status && touch f`, `curl`, `wget`, `powershell -Command Invoke-WebRequest`, `python -c "urllib.request.urlopen(...)"`, `git fetch`, `git add -A`, `git commit`, `git checkout -b`, `git switch -c`, `git reset --hard`, `git stash`, `git branch`, `git tag`, `git config`. Not closed by the rules: Claude Code also auto-allows its own read-only commands (`ls`, `git log -1`, `git diff HEAD`, `<check> && echo x`), whatever `--allowedTools` says. Under `acceptEdits` instead, `echo probe > file` ran, which is why the builder uses `dontAsk`. Running a check runs repository code, so this allowlist bounds intent, not capability (ADR 0006 §3).
 - **Claude reviewer:** has no edit tool; its answer arrives in `structured_output`.
 - **Repository agent files (re-probed 2026-11-01, Claude Code 2.1.316, Windows 11; ADR 0006 §7):** in a temporary repository carrying a canary `CLAUDE.md`, `AGENTS.md`, `.claude/agents/`, `.claude/skills/` and `SessionStart`/`UserPromptSubmit`/`Stop` hooks in `.claude/settings.json`, both ForgeFlow argvs loaded none of them: no canary in the answer, `memory_paths: null` and no canary agent or skill in the `system/init` event, and no hook ran. The same argv without `--restricted` quoted the `CLAUDE.md` canary, listed the agent and skill, and fired all three hooks. So no extra flag is needed; `--bare` would also skip them but accepts only API-key auth. Re-run after a Claude Code upgrade with `FORGEFLOW_LIVE_ISOLATION_PROBE=1 py -3.13 -m unittest tests.test_providers.LiveIsolationProbeTests -v` (two small real model calls; skipped otherwise and in CI). Independently, ForgeFlow's own `.forge/forgeflow.toml` lists the agent files in `protected_paths`, so a builder cannot plant them for a later session.
 - **Codex reviewer:** `read-only` rejected an attempted edit (`patch rejected: writing is blocked by read-only sandbox`); the schema-shaped answer is the `-o` file.
@@ -45,7 +46,7 @@ Providers never commit, push or open PRs. After a builder exits, ForgeFlow asks 
 - otherwise ForgeFlow stages and commits the changes itself (`forgeflow: J3 build round 2`, with the job id and plan hash in the message; repository hooks run as usual) and records a `build-commit` evidence;
 - no change at all is a failed build in the first round, and "nothing more to do" in a rework round.
 
-This one rule replaced several provider-specific ones: the Codex sandbox cannot write `.git` of a linked worktree anyway, a Claude builder has no command tool, and the scope check judges the actual diff whatever the provider claims.
+This one rule replaced several provider-specific ones: the Codex sandbox cannot write `.git` of a linked worktree anyway, a Claude builder's shell runs only the configured checks and read-only git, and the scope check judges the actual diff whatever the provider claims.
 
 ### Checks come from a commit the builder cannot change
 
@@ -140,7 +141,7 @@ Not exercised live: rework rounds and escalation with real providers (covered by
 
 ## Consequences
 
-- A builder cannot run tests itself when Claude Code builds (no command tool); it learns about failures from the next round's prompt. Codex can run commands inside its sandbox. Both are judged only by ForgeFlow's own check run.
+- A Claude builder runs the configured checks itself (since harness v2b; before it, it learned about failures only from the next round's prompt). Codex can run commands inside its sandbox. Both are judged only by ForgeFlow's own check run.
 - Codex configuration isolation blocks repositories with Codex settings/hooks/rules or plugin marketplaces and systems with detected managed configuration. It is not OS isolation; plain skills, repository instructions and sandbox-readable files remain accessible. See [runtime limitations](../codex-runtime.md).
 - Codex cannot build in a repository under `%TEMP%` on Windows with the unelevated sandbox.
 - Token counts are reported as measured when the CLI reports them (Claude: input including cache reads and writes; Codex: `turn.completed` usage). Claude's `total_cost_usd` is recorded as an **API-equivalent estimate**, not a charge: on a subscription nothing is billed per call. Codex reports no cost.

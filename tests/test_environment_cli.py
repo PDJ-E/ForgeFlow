@@ -4,6 +4,8 @@ import contextlib
 import io
 import json
 import re
+import shlex
+import sys
 import unittest
 from collections.abc import Mapping, Sequence
 from pathlib import Path
@@ -19,7 +21,7 @@ from forgeflow.environment import (
     inspect_environment,
 )
 from forgeflow.proc import DEFAULT_TIMEOUT, CommandResult, run_command
-from tests.support import PROJECT_ROOT, GitRepoTestCase
+from tests.support import PROJECT_ROOT, GitRepoTestCase, run_git
 
 
 def _gh_runner(scopes: str | None) -> object:
@@ -111,6 +113,31 @@ class InspectEnvironmentTests(GitRepoTestCase):
         outside.mkdir()
         report = inspect_environment(outside, runner=_offline_runner, network=False)
         self.assertFalse(report.ok)
+
+    def test_doctor_shows_the_builders_exact_shell_and_what_it_does_not_bound(self) -> None:
+        report = inspect_environment(self.repo, runner=_offline_runner, network=False)
+        shell = report.get("builder-shell")
+        assert shell is not None
+        self.assertIn("no usable checks configured", shell.summary)
+        (self.repo / ".forge").mkdir()
+        (self.repo / ".forge" / "forgeflow.toml").write_text(
+            '[[checks.commands]]\nname = "tests"\nargv = ["{python}", "-m", "unittest"]\n'
+            '[[checks.commands]]\nname = "lint"\nargv = ["ruff", "check", "."]\n',
+            encoding="utf-8",
+        )
+        run_git(self.repo, "add", "-A")
+        run_git(self.repo, "commit", "-q", "-m", "checks")
+        report = inspect_environment(self.repo, runner=_offline_runner, network=False)
+        shell = report.get("builder-shell")
+        assert shell is not None
+        expected = [shlex.join([sys.executable, "-m", "unittest"]), "ruff check .", "git status",
+                    "git diff"]  # fmt: skip
+        self.assertEqual(shell.data["commands"], expected)
+        self.assertIn(f"may run exactly: {'; '.join(expected)} ", shell.summary)
+        self.assertIn("bounds intent, not capability", shell.summary)
+        self.assertIn("executes arbitrary, builder-written code as you", shell.summary)
+        self.assertIn("scope and protected-path check, its own commit and checks", shell.summary)
+        self.assertIn("builder-shell", cli._format_report(report))
 
     def test_doctor_writes_nothing(self) -> None:
         inspect_environment(self.repo, runner=_offline_runner, network=False)
