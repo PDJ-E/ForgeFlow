@@ -420,6 +420,30 @@ class ExecutionTests(unittest.TestCase):
             (True, False),
         )
 
+    def test_max_turns_is_enabled_by_help_or_by_a_verified_version(self) -> None:
+        task = self.task(max_turns=40)
+        cases = {
+            "listed in --help": ("2.1.300 (Claude Code)", "  --max-turns <n>\n", True),
+            "verified version": ("2.1.316 (Claude Code)", "  --print\n", True),
+            "newer version": ("2.2.0 (Claude Code)", "  --print\n", True),
+            "older, unlisted": ("2.1.315 (Claude Code)", "  --print\n", False),
+            "no version": (None, "  --print\n", False),
+        }
+        for name, (version, help_text, enabled) in cases.items():
+            with self.subTest(name):
+                responses: dict[tuple[str, ...], tuple[int, str]] = {("--help",): (0, help_text)}
+                if version:
+                    responses[("--version",)] = (0, version + "\n")
+                command = self.cli("claude", {})
+                provider = ClaudeCodeProvider(command=command)
+                with mock.patch("forgeflow.providers.which", return_value="claude"):
+                    provider.detect(ScriptedRunner(responses))
+                self.assertEqual(provider.features["--max-turns"], enabled)
+                result = self.execute(provider, task)  # the fake CLI receives the argv
+                argv = self.log(command)[0]["argv"]
+                self.assertEqual("--max-turns" in argv, enabled)
+                self.assertEqual(result.status, "succeeded")
+
     def test_a_run_stopped_by_a_limit_is_budget_exhausted(self) -> None:
         for limit in ("max_turns", "max_budget_usd"):
             with self.subTest(limit):

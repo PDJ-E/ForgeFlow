@@ -70,6 +70,8 @@ WRITE_OPERATIONS = frozenset({"write", "git-commit"})
 KNOWN_OPERATIONS = frozenset({"read", "run-validation", *WRITE_OPERATIONS})
 _TAIL = 4000  # characters of provider output kept as evidence
 MAX_STREAM_BYTES = 5_000_000  # recorded per invocation; the rest is dropped with a marker
+# Claude Code enforces --max-turns from this version on (verified live) without listing it.
+MAX_TURNS_SINCE = (2, 1, 316)
 
 # The four execution policies are data, not four implementations.
 NAMED_POLICIES: dict[str, Policy] = {
@@ -280,6 +282,12 @@ def _flags_in(help_text: str, flags: tuple[str, ...]) -> dict[str, bool]:
     return {flag: flag in help_text for flag in flags}
 
 
+def _version(text: str | None) -> tuple[int, ...]:
+    """``(2, 1, 316)`` from ``"2.1.316 (Claude Code)"``; ``()`` when there is no version."""
+    match = re.match(r"\s*(\d+(?:\.\d+)*)", text or "")
+    return tuple(int(part) for part in match.group(1).split(".")) if match else ()
+
+
 def _first_line(text: str) -> str | None:
     stripped = text.strip()
     return stripped.splitlines()[0] if stripped else None
@@ -471,6 +479,8 @@ class ClaudeCodeProvider(_CliProvider):
         help_result = _safe(runner, [self.executable_name, "--help"])
         if help_result and help_result.ok:
             caps.features = _flags_in(help_result.stdout, self.feature_flags)
+        if not caps.features.get("--max-turns") and _version(caps.version) >= MAX_TURNS_SINCE:
+            caps.features["--max-turns"] = True  # enforced but unlisted in --help (ADR 0006 §4)
         self.features = caps.features
         auth = _safe(runner, [self.executable_name, "auth", "status"])
         if auth is None or auth.timed_out:

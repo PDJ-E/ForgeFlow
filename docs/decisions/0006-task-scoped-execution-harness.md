@@ -64,7 +64,10 @@ ForgeFlow, not a model, orchestrates. It is a deterministic workflow over the pl
    Output switches to `--output-format stream-json --verbose`; ForgeFlow writes the event
    stream to the job's evidence and derives usage, turns, tools used and the last activity,
    so a timeout or budget stop is diagnosable. Hitting a budget is a distinct result status,
-   not a generic failure.
+   not a generic failure. `--max-turns` is passed when `claude --help` lists it **or** the
+   detected version is ≥ 2.1.316: that version enforces it (verified live: `error_max_turns`,
+   "Reached maximum number of turns (2)") and the official CLI docs document it, but its
+   `--help` does not list it. `--max-budget-usd` is passed only when `--help` lists it.
 5. **Plan size contract.** `design check` requires a `Files:` line per task and reports
    errors above limits (defaults: ≤ 6 tasks per plan, ≤ 6 criteria per task, ≤ 8 files per
    task) and a warning above a plan-size threshold well under `MAX_PLAN_CHARS`. Oversized
