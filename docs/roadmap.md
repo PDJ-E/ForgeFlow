@@ -1,7 +1,7 @@
 # ForgeFlow roadmap
 
-**Status:** Phase 1 in progress. Checkpoints A ([PR #3](https://github.com/PDJ-E/ForgeFlow/pull/3)) and B ([PR #5](https://github.com/PDJ-E/ForgeFlow/pull/5)) are merged; Checkpoint C is implemented on its own branch and PR, awaiting review. Checkpoint D is next. Pre-alpha, nothing released.  
-**Last reviewed:** 2026-10-26.
+**Status:** Phase 1 in progress. Checkpoints A ([PR #3](https://github.com/PDJ-E/ForgeFlow/pull/3)), B ([PR #5](https://github.com/PDJ-E/ForgeFlow/pull/5)) and C ([PR #9](https://github.com/PDJ-E/ForgeFlow/pull/9)) are merged, and so is Harness v2a ([PR #18](https://github.com/PDJ-E/ForgeFlow/pull/18)). Harness v2b is next, then C.1 as split jobs. Pre-alpha, nothing released.  
+**Last reviewed:** 2026-11-01.
 
 The first complete implementation target is **[MVP v0.1](mvp-scope.md)**. Work should proceed in small reviewable PRs and demonstrate real behavior, not merely produce agent-written design claims.
 
@@ -55,6 +55,17 @@ Implemented with [ADR 0005](decisions/0005-build-review-and-delivery.md); `forge
   - **Done:** only after `record_merge` observes on GitHub the merge of that PR with the validated head commit, never on an agent's or reviewer's claim.
   - **Blocked:** `needs_human`, exhausted rework or an unresolved risk. The item returns to its previous status when the job resumes.
   - One mapping from job state to Status (`forgeflow.board.STATUS_FOR_STATE`), applied by a store transition listener rather than inside the transition's side effects, so no GitHub call runs under the state lock; never in adapters or separate rules. Each sync is level-triggered and idempotent and re-reads the item, as the Checkpoint B handoff does. GitHub Projects stays the authoritative board for approved work; ForgeFlow keeps no competing local board.
+
+### Harness v2 — task-scoped execution ([ADR 0006](decisions/0006-task-scoped-execution-harness.md))
+
+Comes before C.1; why is in the ADR's context (J5's failed run).
+
+- [x] v2a ([plan](plans/2026-11-01-harness-v2a.md), PR #18): development harness for this repository, isolation of its agent files from the builder, stream telemetry, `[build]` budgets, plan size contract
+- [ ] v2b ([plan](plans/2026-11-01-harness-v2b.md)): one builder run, commit and check per plan task; resume from the first unfinished task; rework only of the tasks findings name; a Claude builder that runs the configured checks itself. ADR 0006 is accepted after one live run.
+
+### Checkpoint C.1 — Review closes in-scope findings (re-scoped)
+
+Re-planned under the plan size contract as separate jobs, each with its own Gate A, built after Harness v2b: J5 (review contract and finding closure) first, then J6 (accept, continuation and cancel), which depends on J5 being merged. J5's earlier uncommitted worktree is reference material only.
 
 ### Checkpoint D — Optional Knowledge Management
 
