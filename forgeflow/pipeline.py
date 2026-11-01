@@ -37,13 +37,15 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
-from forgeflow import repoconfig
+from forgeflow import design, repoconfig
 from forgeflow.board import BoardListener
 from forgeflow.dispatch import (
+    build_step,
     latest,
     passing_checks_for_round,
     run_builder,
     run_reviewer,
+    start_build,
     verified_approval,
 )
 from forgeflow.errors import (
@@ -57,8 +59,8 @@ from forgeflow.errors import (
 )
 from forgeflow.github import GitHubClient
 from forgeflow.gitrepo import default_base_ref, resolve_commit
-from forgeflow.jobs import UNASSIGNED_PROVIDER, Job, JobState
-from forgeflow.providers import REAL_PROVIDERS, Provider, build_task
+from forgeflow.jobs import UNASSIGNED_PROVIDER, Evidence, Job, JobState
+from forgeflow.providers import REAL_PROVIDERS, Provider, ProviderResult, ProviderTask, build_task
 from forgeflow.store import JobStore, LeaseHandle
 from forgeflow.worktree import WORKTREES_RELATIVE, WorktreeManager, prepare_job_worktree
 
@@ -67,6 +69,7 @@ ProviderFactory = Callable[[str], Provider]
 Reporter = Callable[[str], None]
 _CRITERION = re.compile(r"^\s*[-*] \[[ xX]\] (.+?)\s*$", re.MULTILINE)
 _FEEDBACK_TAIL = 1500  # characters of a failed check's output passed back to the builder
+MAX_TASK_ATTEMPTS = 3  # builder runs per plan task and round while its checks fail
 
 
 def real_provider(name: str) -> Provider:
@@ -322,6 +325,14 @@ def _can_rework(job: Job) -> bool:
 
 
 def _build(ctx: Context) -> str | None:
+    parts = design.plan_parts(ctx.store.approved_plan_text(ctx.load()))
+    if not parts.whole_plan:
+        return _build_tasks(ctx, parts)
+    ctx.report("the plan has no '### T<n>: <title>' tasks; building it in one run")
+    return _build_whole_plan(ctx)
+
+
+def _build_whole_plan(ctx: Context) -> str | None:
     job = ctx.load()
     task = build_task(
         ctx.store,
@@ -353,6 +364,126 @@ def _build(ctx: Context) -> str | None:
     return "verify" if ctx.load().state is S.VERIFYING else None
 
 
+def _build_tasks(ctx: Context, parts: design.PlanParts) -> str | None:
+    """One round, task by task (ADR 0006 §2): each task is its own builder run, scope check,
+    commit and checks, retried with the failures up to ``MAX_TASK_ATTEMPTS`` times. A task that
+    still fails goes to a human; the tasks before it stay committed."""
+    store = ctx.store
+    job = ctx.load()
+    round_no = job.attempts.build + 1
+    feedback = feedback_for(store, job)
+    done: list[str] = []
+    for index, plan_task in enumerate(parts.tasks):
+        retry: tuple[str, ...] = ()
+        for attempt in range(1, MAX_TASK_ATTEMPTS + 1):
+            task = _builder_task(ctx, plan_task.id, tuple(done), feedback + retry)
+            if index == 0 and attempt == 1:
+                start_build(store, ctx.held(), ctx.builder, task)
+            ctx.report(
+                f"round {round_no}: {plan_task.id} ({plan_task.title}) attempt {attempt}: "
+                f"building with {ctx.builder.name}"
+            )
+            message = (
+                f"forgeflow: {job.ref or job.job_id} {plan_task.id} round {round_no}\n\n"
+                f"{plan_task.title}\n\nBuilder: {ctx.builder.name}\nJob: {job.job_id}\n"
+                f"Task: {plan_task.id}\nPlan-sha256: {task.plan_sha256}\n"
+            )
+            try:
+                result = build_step(store, ctx.held(), ctx.builder, task, commit_message=message)
+            except ProviderError as exc:
+                if ctx.load().state is S.NEEDS_HUMAN:  # build_step escalated already
+                    ctx.report(f"needs a human: {plan_task.id}: builder failed: {exc}")
+                    return None
+                raise
+            ctx.report(f"{plan_task.id}: builder {result.status}: {result.summary[:200]}")
+            if ctx.load().state is not S.BUILDING:  # escalated: a failed run or refused change
+                return None
+            evidence = _task_checks(ctx, plan_task.id, attempt, result)
+            if evidence is None:
+                return None
+            if evidence.status == "passed":
+                break
+            retry = tuple(check_failures(store.evidence_payload(ctx.load(), evidence)))
+        else:
+            _escalate(
+                ctx,
+                f"task {plan_task.id} ({plan_task.title}) still fails its checks after "
+                f"{MAX_TASK_ATTEMPTS} attempts; the tasks before it stay committed",
+            )
+            return None
+        done.append(plan_task.id)
+    store.transition(ctx.job_id, S.VERIFYING, lease_token=ctx.token)
+    return "verify"
+
+
+def _builder_task(
+    ctx: Context, task_id: str, done: tuple[str, ...], feedback: tuple[str, ...]
+) -> ProviderTask:
+    return build_task(
+        ctx.store,
+        ctx.job_id,
+        role="builder",
+        acceptance_criteria=ctx.criteria,
+        allowed_paths=ctx.config.allowed_paths,
+        protected_paths=ctx.config.protected_paths,
+        validation_commands=ctx.config.argv_list,
+        **ctx.budgets(),
+        feedback=feedback,
+        model=ctx.options.builder_model,
+        task_id=task_id,
+        done_tasks=done,
+    )
+
+
+def _task_checks(
+    ctx: Context, task_id: str, attempt: int, result: ProviderResult
+) -> Evidence | None:
+    """Run the checks on the task's commit and record its ``task-result``; None if escalated."""
+    try:
+        evidence = ctx.store.run_task_checks(
+            ctx.job_id,
+            ctx.token,
+            ctx.config.argv_list,
+            task=task_id,
+            details={
+                "attempt": attempt,
+                "builder": {
+                    "status": result.status,
+                    "usage": result.to_dict()["usage"],
+                    "telemetry": result.telemetry,
+                },
+            },
+            mocked=result.mocked,
+            timeout=ctx.config.check_timeout,
+            names=ctx.config.names,
+            source=dict(ctx.config.source),
+        )
+    except InvalidTransitionError as exc:  # e.g. uncommitted changes appeared
+        _escalate(ctx, f"{task_id}: the checks could not run: {exc}")
+        return None
+    ctx.report(f"{task_id}: checks {evidence.status} on {(evidence.commit or '?')[:12]}")
+    return evidence
+
+
+def check_failures(payload: dict[str, Any]) -> list[str]:
+    """What a failed checks record tells the builder: each failing command's output tail."""
+    items: list[str] = []
+    for command in payload.get("commands", []):
+        if command.get("ok"):
+            continue
+        output = (command.get("stderr_tail") or "") + (command.get("stdout_tail") or "")
+        items.append(
+            f"Check {command.get('name') or ' '.join(command.get('argv', []))!r} failed "
+            f"(exit {command.get('returncode')}, timed out {command.get('timed_out')}). "
+            f"End of its output:\n{output[-_FEEDBACK_TAIL:]}"
+            if "error" not in command
+            else f"Check {command.get('name')!r} could not run: {command['error']}"
+        )
+    if not payload.get("worktree_unchanged", True):
+        items.append("The checks changed files or commits; checks must not modify the tree.")
+    return items
+
+
 def feedback_for(store: JobStore, job: Job) -> tuple[str, ...]:
     """What the previous round left to fix, rebuilt from the record (so resumes see it too)."""
     interrupted = job.state is S.INTERRUPTED
@@ -375,21 +506,7 @@ def feedback_for(store: JobStore, job: Job) -> tuple[str, ...]:
             )
             continue
         if evidence.kind == "checks" and evidence.status == "failed":
-            for command in payload.get("commands", []):
-                if command.get("ok"):
-                    continue
-                output = (command.get("stderr_tail") or "") + (command.get("stdout_tail") or "")
-                items.append(
-                    f"Check {command.get('name') or ' '.join(command.get('argv', []))!r} failed "
-                    f"(exit {command.get('returncode')}, timed out {command.get('timed_out')}). "
-                    f"End of its output:\n{output[-_FEEDBACK_TAIL:]}"
-                    if "error" not in command
-                    else f"Check {command.get('name')!r} could not run: {command['error']}"
-                )
-            if not payload.get("worktree_unchanged", True):
-                items.append(
-                    "The checks changed files or commits; checks must not modify the tree."
-                )
+            items += check_failures(payload)
         elif evidence.kind == "review" and evidence.status == "request-changes":
             items += [f"Reviewer finding: {f}" for f in payload.get("findings", [])]
         elif evidence.kind == "human-feedback":

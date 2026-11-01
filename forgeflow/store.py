@@ -1070,9 +1070,10 @@ class JobStore:
         """
         if not _EVIDENCE_KIND.match(kind):
             raise ValidationError(f"invalid evidence kind {kind!r}")
-        if kind == "checks":
+        if kind in ("checks", "task-result"):
             raise ValidationError(
-                "checks evidence is recorded only by run_checks(), which runs them"
+                f"{kind} evidence is recorded only by run_checks()/run_task_checks(), which "
+                "run them"
             )
         if commit is not None and not re.fullmatch(r"[0-9a-f]{40}([0-9a-f]{24})?", commit):
             raise ValidationError(f"{commit!r} is not a full commit id")
@@ -1139,14 +1140,62 @@ class JobStore:
         the commands left that commit and a clean worktree behind. ``names`` label the commands
         and ``source`` says where they were configured; both are recorded as given.
         """
+        return self._run_and_record(
+            job_id, lease_token, commands, S.VERIFYING, "checks", {}, False,
+            runner=runner, timeout=timeout, names=names, source=source,
+        )  # fmt: skip
+
+    def run_task_checks(
+        self,
+        job_id: str,
+        lease_token: str,
+        commands: Sequence[Sequence[str]],
+        *,
+        task: str,
+        details: dict[str, Any],
+        mocked: bool,
+        runner: Runner = run_command,
+        timeout: float = 600.0,
+        names: Sequence[str] = (),
+        source: dict[str, Any] | None = None,
+    ) -> Evidence:
+        """The same checks on one plan task's commit, inside its BUILDING round (ADR 0006 §2).
+
+        Recorded as ``task-result`` evidence (task, commit, status, checks, plus ``details`` such
+        as the builder's usage), never as ``checks``: delivery still needs the checks VERIFYING
+        runs on the round's final commit. ``mocked`` is the builder's: the commands are real.
+        """
+        return self._run_and_record(
+            job_id, lease_token, commands, S.BUILDING, "task-result",
+            {**details, "task": task}, mocked,
+            runner=runner, timeout=timeout, names=names, source=source,
+        )  # fmt: skip
+
+    def _run_and_record(
+        self,
+        job_id: str,
+        lease_token: str,
+        commands: Sequence[Sequence[str]],
+        phase: JobState,
+        kind: str,
+        extra: dict[str, Any],
+        mocked: bool,
+        *,
+        runner: Runner,
+        timeout: float,
+        names: Sequence[str],
+        source: dict[str, Any] | None,
+    ) -> Evidence:
         if not commands or any(not argv for argv in commands):
             raise ValidationError("at least one non-empty check command is required")
         job = self.load(job_id)
         lease = job.lease
         if lease is None or not secrets.compare_digest(lease.token, lease_token):
             raise LeaseError("running checks requires the caller to hold the job lease")
-        if job.state is not S.VERIFYING:
-            raise InvalidTransitionError(f"checks run while verifying, not in {job.state.value}")
+        if job.state is not phase:
+            raise InvalidTransitionError(
+                f"{kind} checks run in {phase.value}, not in {job.state.value}"
+            )
         worktree = self.job_worktree(job)
         commit = self._clean_head(worktree)
         build_round = job.attempts.build
@@ -1177,6 +1226,7 @@ class JobStore:
         unchanged = after == commit and not dirty_after
         passed = unchanged and all(r["ok"] for r in results)
         payload = {
+            **extra,
             "commit": commit,
             "build_round": build_round,
             "commands": results,
@@ -1189,17 +1239,17 @@ class JobStore:
             if (
                 current.lease is None
                 or current.lease.token != lease_token
-                or current.state is not S.VERIFYING
+                or current.state is not phase
                 or current.attempts.build != build_round
             ):
                 raise LeaseError("the job changed hands or phase while its checks ran")
 
         return self._record_evidence(
             job_id,
-            "checks",
+            kind,
             "passed" if passed else "failed",
             payload,
-            mocked=False,
+            mocked=mocked,
             commit=commit,
             check=still_owned,
         )

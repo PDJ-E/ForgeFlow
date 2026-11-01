@@ -23,12 +23,12 @@ from forgeflow import cli
 from forgeflow.codex_runtime import ISOLATION_ARGS
 from forgeflow.errors import InvalidTransitionError, ValidationError
 from forgeflow.jobs import JobState
-from forgeflow.pipeline import acceptance_criteria, feedback_for
+from forgeflow.pipeline import MAX_TASK_ATTEMPTS, acceptance_criteria, feedback_for
 from forgeflow.proc import run_tracked
 from forgeflow.providers import ClaudeCodeProvider, CodexProvider, ProviderUnavailableError
 from forgeflow.repoconfig import CONFIG_PATH
 from forgeflow.worktree import WORKTREES_RELATIVE
-from tests.pipeline_support import APPROVE, CONFIG, PipelineTestCase, request_changes
+from tests.pipeline_support import APPROVE, CONFIG, TASK_PLAN, PipelineTestCase, request_changes
 from tests.support import PROJECT_ROOT, run_git
 
 S = JobState
@@ -212,6 +212,117 @@ class ReworkTests(PipelineTestCase):
         self.assertEqual([e.status for e in job.evidence if e.kind == "checks"][-1], "passed")
         last_prompt = [r["prompt"] for r in self.fake_cli_log(builder) if r["event"] == "start"][-1]
         self.assertIn("the check expects 'hello'", last_prompt)
+
+
+NOTE = {"writes": {"notes.txt": "it says hello\n"}, "result": "noted"}
+BROKEN_NOTE = {"writes": {"notes.txt": "x\n", "greet.txt": "hi\n"}, "result": "broke it"}
+
+
+class TaskRoundTests(PipelineTestCase):
+    """ADR 0006 §2: a round runs, commits and checks the plan's tasks one by one."""
+
+    def starts(self, command: list[str]) -> list[dict[str, Any]]:
+        return [r for r in self.fake_cli_log(command) if r["event"] == "start"]
+
+    def subjects(self, job: Any) -> list[str]:
+        assert job.worktree is not None
+        log = run_git(self.worktree(job), "log", "--format=%s", f"{job.worktree.base_sha}..HEAD")
+        return log.splitlines()[::-1]
+
+    def test_each_task_is_built_committed_and_checked_then_the_round_is_verified(self) -> None:
+        job = self.handed_off_job(TASK_PLAN)
+        factory, builder, reviewer = self.providers([HELLO, NOTE], {"review": APPROVE})
+        job = self.run_pipeline(job.job_id, factory)
+
+        self.assertEqual(
+            [(e.kind, e.status) for e in job.evidence],
+            [
+                ("provider-result", "succeeded"),
+                ("build-commit", "committed"),
+                ("task-result", "passed"),
+                ("provider-result", "succeeded"),
+                ("build-commit", "committed"),
+                ("task-result", "passed"),
+                ("checks", "passed"),
+                ("review", "approve"),
+            ],
+        )
+        self.assertEqual((job.attempts.build, job.attempts.rework), (1, 0))
+        ref = job.ref or job.job_id
+        self.assertEqual(self.subjects(job), [f"forgeflow: {ref} T1 round 1",
+                                              f"forgeflow: {ref} T2 round 1"])  # fmt: skip
+        commits = [e.commit for e in job.evidence if e.kind == "build-commit"]
+        results = [e for e in job.evidence if e.kind == "task-result"]
+        self.assertEqual([e.commit for e in results], commits)
+        payload = self.store.evidence_payload(job, results[1])
+        self.assertEqual((payload["task"], payload["attempt"], payload["commit"]),
+                         ("T2", 1, commits[1]))  # fmt: skip
+        self.assertEqual([c["name"] for c in payload["commands"]], ["greeting"])
+        self.assertEqual(payload["builder"]["status"], "succeeded")
+        self.assertGreater(payload["builder"]["usage"]["output_tokens"], 0)
+        self.assertTrue(results[1].mocked, "the builder was simulated")
+        # The final checks and the review ran on the last task's commit.
+        self.assertEqual([e.commit for e in job.evidence if e.kind in ("checks", "review")],
+                         [commits[1]] * 2)  # fmt: skip
+        first, second = (s["prompt"] for s in self.starts(builder))
+        self.assertIn("- T1: Write the greeting [current]\n- T2: Add a note [pending]", first)
+        self.assertIn("- T1: Write the greeting [done]\n- T2: Add a note [current]", second)
+        self.assertNotIn("notes.txt explains", first)
+        self.assertEqual(len(self.starts(reviewer)), 1)
+        self.assertEqual(job.state, S.NEEDS_HUMAN)  # simulated: never delivered
+        self.assertEqual(self.world.pulls, {})
+
+    def test_a_task_whose_checks_fail_is_retried_with_the_failures(self) -> None:
+        job = self.handed_off_job(TASK_PLAN)
+        factory, builder, _ = self.providers([HELLO, BROKEN_NOTE, HELLO], {"review": APPROVE})
+        job = self.run_pipeline(job.job_id, factory)
+        results = [e for e in job.evidence if e.kind == "task-result"]
+        self.assertEqual([e.status for e in results], ["passed", "failed", "passed"])
+        payloads = [self.store.evidence_payload(job, e) for e in results]
+        self.assertEqual([(p["task"], p["attempt"]) for p in payloads],
+                         [("T1", 1), ("T2", 1), ("T2", 2)])  # fmt: skip
+        retry = self.starts(builder)[2]["prompt"]
+        self.assertIn("Add a note [current]", retry)
+        self.assertIn("Check 'greeting' failed", retry)
+        self.assertEqual((job.attempts.build, job.attempts.rework), (1, 0))
+        self.assertEqual([e.status for e in job.evidence if e.kind == "review"], ["approve"])
+
+    def test_past_the_task_limit_a_human_gets_the_task_and_earlier_commits_stay(self) -> None:
+        job = self.handed_off_job(TASK_PLAN)
+        factory, builder, reviewer = self.providers([HELLO, BROKEN_NOTE], {"review": APPROVE})
+        job = self.run_pipeline(job.job_id, factory)
+        self.assertEqual(job.state, S.NEEDS_HUMAN)
+        self.assertEqual(len(self.starts(builder)), 1 + MAX_TASK_ATTEMPTS)
+        statuses = [e.status for e in job.evidence if e.kind == "task-result"]
+        self.assertEqual(statuses, ["passed"] + ["failed"] * MAX_TASK_ATTEMPTS)
+        self.assertIn(f"task T2 (Add a note) still fails its checks after {MAX_TASK_ATTEMPTS}",
+                      " ".join(self.lines))  # fmt: skip
+        ref = job.ref or job.job_id
+        self.assertEqual(self.subjects(job)[0], f"forgeflow: {ref} T1 round 1")
+        # Retries that change nothing more add no commit; the first T2 attempt is kept.
+        self.assertEqual(self.subjects(job)[1:], [f"forgeflow: {ref} T2 round 1"])
+        self.assertNotIn("checks", [e.kind for e in job.evidence])
+        self.assertEqual(self.starts(reviewer), [])
+        self.assertEqual(job.attempts.build, 1)
+
+    def test_a_plan_without_tasks_is_built_in_one_run_with_a_warning(self) -> None:
+        job = self.handed_off_job()
+        factory, builder, _ = self.providers(HELLO, {"review": APPROVE})
+        job = self.run_pipeline(job.job_id, factory)
+        self.assertIn("the plan has no '### T<n>: <title>' tasks", " ".join(self.lines))
+        self.assertNotIn("task-result", [e.kind for e in job.evidence])
+        self.assertNotIn("[current]", self.starts(builder)[0]["prompt"])
+
+    def test_task_results_come_only_from_checks_run_in_a_build_round(self) -> None:
+        job = self.ready_job()
+        with self.assertRaisesRegex(ValidationError, "recorded only by"):
+            self.store.record_evidence(job.job_id, "task-result", "passed", {}, mocked=False)
+        with self.store.acquire_lease(job.job_id, "builder", "mock") as lease:
+            with self.assertRaisesRegex(InvalidTransitionError, "run in building"):
+                self.store.run_task_checks(
+                    job.job_id, lease.token, [["git", "status"]], task="T1", details={},
+                    mocked=False,
+                )  # fmt: skip
 
 
 class SafetyTests(PipelineTestCase):

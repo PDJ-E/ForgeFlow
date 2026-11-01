@@ -51,10 +51,85 @@ def run_builder(
     paths and commits them (see ``commit_build``); out-of-scope changes stay in the worktree,
     uncommitted and untouched, and the job goes to NEEDS_HUMAN.
     """
+    start_build(store, lease, provider, task)
+    result = build_step(store, lease, provider, task, commit_message=commit_message)
+    if store.load(task.job_id).state is JobState.BUILDING:
+        store.transition(task.job_id, JobState.VERIFYING, lease_token=lease.token)
+    return result
+
+
+def start_build(
+    store: JobStore, lease: LeaseHandle, provider: Provider, task: ProviderTask
+) -> None:
+    """Verify that ``task`` may be dispatched, then enter BUILDING (a new build round)."""
+    _dispatchable(store, lease, provider, task)
+    # Gate A, rework bounds, the slot rule and lease ownership are enforced by this transition.
+    store.transition(task.job_id, JobState.BUILDING, lease_token=lease.token)
+
+
+def build_step(
+    store: JobStore,
+    lease: LeaseHandle,
+    provider: Provider,
+    task: ProviderTask,
+    *,
+    commit_message: str | None = None,
+) -> ProviderResult:
+    """One builder invocation inside a BUILDING round; the job stays BUILDING if it succeeds.
+
+    A task-scoped round (ADR 0006 §2) calls this once per plan task. Every call re-verifies
+    what ``run_builder`` does; a failed run, a refused change or a failed commit escalates to
+    NEEDS_HUMAN exactly as there.
+    """
+    worktree = _dispatchable(store, lease, provider, task)
+    if store.load(task.job_id).state is not JobState.BUILDING:
+        raise ProviderError("a build step runs inside a BUILDING round")
+    try:
+        result = provider.execute(task, lease)
+    except Exception as exc:
+        store.record_evidence(
+            task.job_id,
+            "provider-error",
+            "failed",
+            {"provider": provider.name, "error": str(exc)},
+            mocked=not getattr(provider, "real", False),
+        )
+        store.transition(
+            task.job_id,
+            JobState.NEEDS_HUMAN,
+            lease_token=lease.token,
+            reason=f"builder {provider.name} raised: {exc}",
+        )
+        raise
+    store.record_evidence(
+        task.job_id, "provider-result", result.status, result.to_dict(), mocked=result.mocked
+    )
+    if result.status != "succeeded":
+        detail = f": {result.summary[:300]}" if result.summary else ""
+        store.transition(
+            task.job_id,
+            JobState.NEEDS_HUMAN,
+            lease_token=lease.token,
+            reason=f"builder {provider.name} reported {result.status}{detail}",
+        )
+        return result
+    if commit_message is not None:
+        problem = commit_build(store, task, worktree, commit_message, mocked=result.mocked)
+        if problem is not None:
+            store.transition(
+                task.job_id, JobState.NEEDS_HUMAN, lease_token=lease.token, reason=problem
+            )
+    return result
+
+
+def _dispatchable(
+    store: JobStore, lease: LeaseHandle, provider: Provider, task: ProviderTask
+) -> Path:
+    """The job's verified worktree, if ``task`` may be dispatched to ``provider`` now."""
     task.validate()
     job = store.load(lease.job_id)
     if task.role != "builder":
-        raise ProviderError("run_builder only dispatches builder tasks")
+        raise ProviderError("only builder tasks are dispatched to a builder")
     if task.job_id != job.job_id:
         raise ProviderError("the task belongs to a different job")
     if provider.name != job.policy.builder:
@@ -75,47 +150,7 @@ def run_builder(
         or task.plan_text != approved_plan
     ):
         raise ProviderError("the task does not carry the approved plan")
-
-    # Gate A, rework bounds, the slot rule and lease ownership are enforced by this transition.
-    store.transition(job.job_id, JobState.BUILDING, lease_token=lease.token)
-    try:
-        result = provider.execute(task, lease)
-    except Exception as exc:
-        store.record_evidence(
-            job.job_id,
-            "provider-error",
-            "failed",
-            {"provider": provider.name, "error": str(exc)},
-            mocked=not getattr(provider, "real", False),
-        )
-        store.transition(
-            job.job_id,
-            JobState.NEEDS_HUMAN,
-            lease_token=lease.token,
-            reason=f"builder {provider.name} raised: {exc}",
-        )
-        raise
-    store.record_evidence(
-        job.job_id, "provider-result", result.status, result.to_dict(), mocked=result.mocked
-    )
-    if result.status != "succeeded":
-        detail = f": {result.summary[:300]}" if result.summary else ""
-        store.transition(
-            job.job_id,
-            JobState.NEEDS_HUMAN,
-            lease_token=lease.token,
-            reason=f"builder {provider.name} reported {result.status}{detail}",
-        )
-        return result
-    if commit_message is not None:
-        problem = commit_build(store, task, worktree, commit_message, mocked=result.mocked)
-        if problem is not None:
-            store.transition(
-                job.job_id, JobState.NEEDS_HUMAN, lease_token=lease.token, reason=problem
-            )
-            return result
-    store.transition(job.job_id, JobState.VERIFYING, lease_token=lease.token)
-    return result
+    return worktree
 
 
 def changed_paths(worktree: Path) -> list[str]:
