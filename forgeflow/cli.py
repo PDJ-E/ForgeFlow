@@ -514,6 +514,9 @@ def _idea(start: Path, args: argparse.Namespace) -> int:
         )
         replaced = f" (replaces {item.supersedes})" if item.supersedes else ""
         print(f"{item.id} [{item.status}] {item.text}{replaced}")
+        warning = discovery.live_warning(discovery.load(store, args.job_id))
+        if warning:
+            print(f"forgeflow: warning: {warning}", file=sys.stderr)
         return 0
     if args.action == "mark":
         item = discovery.mark(store, args.job_id, args.item_id, args.status, note=args.note)

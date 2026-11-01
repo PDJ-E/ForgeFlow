@@ -193,9 +193,10 @@ class DesignWorkflowTests(GitRepoTestCase):
             "# Greeting",
             "- No greeting",
             "- Print hello",
-            "Banner (rejected: noisy)",
+            "1 rejected or superseded discovery item(s) not shown",
         ):
             self.assertIn(expected, text)
+        self.assertNotIn("Banner", text, "only live discovery items reach the plan")
         self.assertIn("- Localisation", text)
         self.assertFalse(design.check(self.store, job_id).ok)  # placeholders must be resolved
         path.write_text("# mine\n", encoding="utf-8")

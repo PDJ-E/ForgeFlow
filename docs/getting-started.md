@@ -88,7 +88,7 @@ py -3.13 -m forgeflow init --project 2    # binds Project #2; approved work goes
 
 ### 2. Discuss the idea
 
-In Claude Code type `/forge idea <your idea>`; in Codex, `$forge idea <your idea>`. The agent asks a few proportional questions, compares approaches and records only the **outcomes** with `forgeflow idea add/mark`: requirements, decisions, rejected options and why, open questions. Resume any time with `/forge idea resume <job>` (it reads `forgeflow idea show <job>`). If Anthropic's Product Management skills are available in the host (`forgeflow skills --host claude-code|codex`), the agent uses them; otherwise it uses short built-in guidance.
+In Claude Code type `/forge idea <your idea>`; in Codex, `$forge idea <your idea>`. The agent asks a few proportional questions, compares approaches and records only the **outcomes** with `forgeflow idea add/mark`: requirements, decisions, rejected options and why, open questions. Resume any time with `/forge idea resume <job>` (it reads `forgeflow idea show <job>`). `idea show` and the plan scaffold list only live (proposed or accepted) outcomes and count the rejected or superseded ones they hide (`--all` shows them); `idea add` warns when a job has more than 40 live outcomes, a sign the idea should be split. If Anthropic's Product Management skills are available in the host (`forgeflow skills --host claude-code|codex`), the agent uses them; otherwise it uses short built-in guidance.
 
 The same steps work without an agent:
 

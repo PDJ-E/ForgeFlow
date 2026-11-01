@@ -226,15 +226,17 @@ def scaffold_text(job: Job, found: discovery.Discovery) -> str:
     objective = live("goal")
     constraints = live("constraint")
     decisions = live("decision")
-    rejected = [
-        f"{i.text} (rejected{': ' + i.note if i.note else ''})"
-        for i in found.items
-        if i.kind in ("alternative", "decision") and i.status == "rejected"
-    ]
+    hidden = len(found.items) - len(found.live())
+    closed = (
+        f"\n<!-- {hidden} rejected or superseded discovery item(s) not shown: "
+        f"forgeflow idea show {job.ref or job.job_id} --all -->\n"
+        if hidden
+        else ""
+    )
     risks = live("risk") + [f"Assumption: {a}" for a in live("assumption")]
     questions = live("question")
     return f"""# {job.title}
-
+{closed}
 ## Problem and objective
 
 {_bullets(problem, "who has which problem, and why it matters")}
@@ -261,7 +263,7 @@ architecture and ADRs
 
 ## Alternatives and trade-offs
 
-{_bullets(live("alternative") + rejected, "options considered and why this one")}
+{_bullets(live("alternative"), "options considered and why this one")}
 
 ## Scope
 
