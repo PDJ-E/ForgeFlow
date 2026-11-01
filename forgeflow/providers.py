@@ -42,7 +42,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any, TextIO
 
-from forgeflow import fsutil, prompts
+from forgeflow import design, fsutil, prompts
 from forgeflow.codex_runtime import (
     ISOLATION_ARGS,
     CodexAuthenticationError,
@@ -120,6 +120,9 @@ class ProviderTask:
     stream_path: str = ""  # Claude: where the event stream is recorded as it arrives
     max_turns: int | None = None  # per invocation; passed only to a CLI that supports it
     max_budget_usd: float | None = None
+    # builder: the plan task this run implements ("" = the whole plan) and those already done
+    task_id: str = ""
+    done_tasks: tuple[str, ...] = ()
 
     def validate(self) -> None:
         if self.role not in ROLES:
@@ -145,6 +148,8 @@ class ProviderTask:
             raise ValidationError("turn and budget limits must be positive")
         if hashlib.sha256(self.plan_text.encode("utf-8")).hexdigest() != self.plan_sha256:
             raise ValidationError("the task's plan text is not the approved plan")
+        if self.task_id:
+            design.plan_parts(self.plan_text).task(self.task_id)
 
     def permits_path(self, rel_path: str) -> bool:
         """True if ``rel_path`` is a plain repository-relative path inside an allowed pattern.
@@ -1062,6 +1067,8 @@ def build_task(
     model: str | None = None,
     max_turns: int | None = None,
     max_budget_usd: float | None = None,
+    task_id: str = "",
+    done_tasks: tuple[str, ...] = (),
 ) -> ProviderTask:
     """Derive a task from the job record so the approved plan and worktree cannot drift."""
     job = store.load(job_id)
@@ -1092,6 +1099,8 @@ def build_task(
         model=model,
         max_turns=max_turns,
         max_budget_usd=max_budget_usd,
+        task_id=task_id,
+        done_tasks=done_tasks,
         stream_path=str(
             store.job_dir(job_id)
             / "evidence"

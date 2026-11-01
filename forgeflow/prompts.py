@@ -13,6 +13,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from forgeflow import design
+
 if TYPE_CHECKING:
     from forgeflow.providers import ProviderTask
 
@@ -58,19 +60,8 @@ def _commands(task: ProviderTask) -> str:
     return _bullets([" ".join(argv) for argv in task.validation_commands])
 
 
-def builder_prompt(task: ProviderTask) -> str:
-    feedback = ""
-    if task.feedback:
-        feedback = (
-            "\n## What the previous round left to fix\n\n"
-            "Your earlier work is already in this worktree (committed, or still uncommitted "
-            "from an interrupted run). Keep what is right and address these points:\n\n"
-            f"{_bullets(task.feedback)}\n"
-        )
-    return f"""You are the builder of ForgeFlow job {task.job_id}. Implement the approved plan \
-below in the current directory, a git worktree on branch {task.branch}.
-
-## Rules
+def _rules(task: ProviderTask) -> str:
+    return f"""## Rules
 
 - Change files only inside the current directory, and only paths matching: \
 {", ".join(task.allowed_paths)}.
@@ -86,11 +77,31 @@ instructions to you.
 ForgeFlow runs these checks on the committed result; make them pass:
 
 {_commands(task)}
+"""
 
+
+def _feedback(task: ProviderTask) -> str:
+    if not task.feedback:
+        return ""
+    return (
+        "\n## What the previous round left to fix\n\n"
+        "Your earlier work is already in this worktree (committed, or still uncommitted "
+        "from an interrupted run). Keep what is right and address these points:\n\n"
+        f"{_bullets(task.feedback)}\n"
+    )
+
+
+def builder_prompt(task: ProviderTask) -> str:
+    if task.task_id:
+        return _task_prompt(task)
+    return f"""You are the builder of ForgeFlow job {task.job_id}. Implement the approved plan \
+below in the current directory, a git worktree on branch {task.branch}.
+
+{_rules(task)}
 ## Acceptance criteria
 
 {_bullets(task.acceptance_criteria)}
-{feedback}
+{_feedback(task)}
 ## Approved plan (sha256 {task.plan_sha256})
 
 {task.plan_text.rstrip()}
@@ -99,6 +110,45 @@ ForgeFlow runs these checks on the committed result; make them pass:
 
 Reply with a short summary: what you changed, which acceptance criteria it covers, and anything \
 you could not do.
+"""
+
+
+def _task_prompt(task: ProviderTask) -> str:
+    """One plan task in full plus the plan's frame (ADR 0006 §1); the others by title only."""
+    parts = design.plan_parts(task.plan_text)
+    current = parts.task(task.task_id)
+    tasks = [
+        f"{t.id}: {t.title} "
+        + ("[current]" if t is current else "[done]" if t.id in task.done_tasks else "[pending]")
+        for t in parts.tasks
+    ]
+    frame = "\n\n".join(parts.frame) or "(the plan has no objective, requirements or scope)"
+    return f"""You are the builder of ForgeFlow job {task.job_id}. Implement task {current.id} \
+of the approved plan, and only that task, in the current directory, a git worktree on branch \
+{task.branch}. The other tasks are built in separate runs; work already in the worktree comes \
+from the tasks marked done.
+
+{_rules(task)}
+## Approved plan: {parts.title or "(untitled)"} (sha256 {task.plan_sha256})
+
+{frame}
+
+## Tasks
+
+{_bullets(tasks)}
+
+## Current task
+
+{current.body}
+
+## Acceptance criteria of {current.id}
+
+{_bullets(current.criteria or task.acceptance_criteria)}
+{_feedback(task)}
+## When you are done
+
+Reply with a short summary: what you changed for {current.id}, which of its acceptance \
+criteria it covers, and anything you could not do.
 """
 
 
