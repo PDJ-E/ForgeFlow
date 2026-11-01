@@ -155,13 +155,15 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--builder-model", help="model passed to the builder CLI (default: its own)")
     run.add_argument("--reviewer-model", help="model passed to the reviewer CLI")
     run.add_argument(
-        "--timeout", type=int, default=1800, help="seconds per provider run (default 1800)"
+        "--timeout",
+        type=int,
+        help="seconds per provider run (default: [build] task_timeout_seconds, else 1800)",
     )
     run.add_argument("--reason", default="", help="why a job that waits for a human may continue")
     resume = sub.add_parser("resume", help="continue an interrupted job with the same providers")
     resume.add_argument("job_id")
     resume.add_argument("--reason", default="", help="why a job that waits for a human may go on")
-    resume.add_argument("--timeout", type=int, default=1800)
+    resume.add_argument("--timeout", type=int, help="as for run")
     rework = sub.add_parser("rework", help="another round on a delivered draft PR (owner request)")
     rework.add_argument("job_id")
     rework.add_argument("--reason", required=True, help="what should change")
@@ -512,6 +514,9 @@ def _idea(start: Path, args: argparse.Namespace) -> int:
         )
         replaced = f" (replaces {item.supersedes})" if item.supersedes else ""
         print(f"{item.id} [{item.status}] {item.text}{replaced}")
+        warning = discovery.live_warning(discovery.load(store, args.job_id))
+        if warning:
+            print(f"forgeflow: warning: {warning}", file=sys.stderr)
         return 0
     if args.action == "mark":
         item = discovery.mark(store, args.job_id, args.item_id, args.status, note=args.note)

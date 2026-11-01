@@ -88,7 +88,7 @@ py -3.13 -m forgeflow init --project 2    # binds Project #2; approved work goes
 
 ### 2. Discuss the idea
 
-In Claude Code type `/forge idea <your idea>`; in Codex, `$forge idea <your idea>`. The agent asks a few proportional questions, compares approaches and records only the **outcomes** with `forgeflow idea add/mark`: requirements, decisions, rejected options and why, open questions. Resume any time with `/forge idea resume <job>` (it reads `forgeflow idea show <job>`). If Anthropic's Product Management skills are available in the host (`forgeflow skills --host claude-code|codex`), the agent uses them; otherwise it uses short built-in guidance.
+In Claude Code type `/forge idea <your idea>`; in Codex, `$forge idea <your idea>`. The agent asks a few proportional questions, compares approaches and records only the **outcomes** with `forgeflow idea add/mark`: requirements, decisions, rejected options and why, open questions. Resume any time with `/forge idea resume <job>` (it reads `forgeflow idea show <job>`). `idea show` and the plan scaffold list only live (proposed or accepted) outcomes and count the rejected or superseded ones they hide (`--all` shows them); `idea add` warns when a job has more than 40 live outcomes, a sign the idea should be split. If Anthropic's Product Management skills are available in the host (`forgeflow skills --host claude-code|codex`), the agent uses them; otherwise it uses short built-in guidance.
 
 The same steps work without an agent:
 
@@ -101,7 +101,7 @@ py -3.13 -m forgeflow idea show <job> --all
 
 ### 3. Design the plan
 
-`/forge design <job>` (or `forgeflow design new <job>`) creates **one** plan file, `.forge/runtime/jobs/<job>/plan.md`, prefilled from the discovery. Edit it with the agent, which uses the Engineering skills when available. `forgeflow design check <job>` lists what is missing. When you are content: `forgeflow design submit <job>` pins those exact bytes as plan version *n*. Changing your mind later: `forgeflow design revise <job> --reason "..."`, then submit again (a new version).
+`/forge design <job>` (or `forgeflow design new <job>`) creates **one** plan file, `.forge/runtime/jobs/<job>/plan.md`, prefilled from the discovery. Edit it with the agent, which uses the Engineering skills when available. `forgeflow design check <job>` lists what is missing. Each `### T<n>` task needs a `Files:` line, and a job is kept small enough to build and review: more than 6 tasks, more than 6 acceptance criteria in a task or more than 8 files in a task is an error, and a plan over 16,000 characters gets a warning. Larger work is split into separate jobs before approval. Plans approved before these limits still load and display. When you are content: `forgeflow design submit <job>` pins those exact bytes as plan version *n*. Changing your mind later: `forgeflow design revise <job> --reason "..."`, then submit again (a new version).
 
 The approved plan is published **verbatim** as the issue body. Keep private notes in the discovery, which never leaves your machine.
 
@@ -152,7 +152,12 @@ argv = ["{python}", "-m", "ruff", "check", "."]
 [build]
 allowed_paths = ["*"]                                  # what the builder may change
 protected_paths = [".forge/*", ".github/workflows/*"]  # the default; changes here go to you
+max_turns = 100              # per provider invocation (default 100, at most 500)
+max_budget_usd = 5.0         # per invocation, API-equivalent (default 5.0, at most 100)
+task_timeout_seconds = 1800  # per invocation (default 1800, at most 14400); run/resume --timeout override it
 ```
+
+The turn and budget limits are passed to Claude Code as `--max-turns` / `--max-budget-usd` when its `--help` lists them; `--max-turns` is also passed from Claude Code 2.1.316 on, which enforces it without listing it ([ADR 0006](decisions/0006-task-scoped-execution-harness.md) §4). A run stopped by either limit is reported as `budget_exhausted` and goes to you; it is not retried.
 
 `{python}` is replaced with the interpreter running ForgeFlow (3.13+). Commands run without a shell, in the job's worktree. The file is read from the job's **base commit** (or, until it reaches the base, from your checkout's HEAD), never from the builder's worktree, so a builder cannot change its own checks. ForgeFlow's own configuration is [`.forge/forgeflow.toml`](../.forge/forgeflow.toml). Without one, `run` refuses.
 

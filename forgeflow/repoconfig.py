@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import sys
 import tomllib
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -39,6 +39,13 @@ DEFAULT_CHECK_TIMEOUT = 600
 DEFAULT_ALLOWED_PATHS = ("*",)
 # The check configuration and CI definitions decide what "validated" means.
 DEFAULT_PROTECTED_PATHS = (".forge/*", ".github/workflows/*")
+# Per provider invocation (ADR 0006 §4). A limit is reached as a run status, never retried.
+DEFAULT_MAX_TURNS = 100
+DEFAULT_MAX_BUDGET_USD = 5.0
+DEFAULT_TASK_TIMEOUT = 1800
+MAX_TURNS_LIMIT = 500
+MAX_BUDGET_USD_LIMIT = 100.0
+MAX_TASK_TIMEOUT = 4 * 3600
 
 
 @dataclass(frozen=True)
@@ -53,6 +60,9 @@ class RepoConfig:
     check_timeout: int = DEFAULT_CHECK_TIMEOUT
     allowed_paths: tuple[str, ...] = DEFAULT_ALLOWED_PATHS
     protected_paths: tuple[str, ...] = DEFAULT_PROTECTED_PATHS
+    max_turns: int = DEFAULT_MAX_TURNS
+    max_budget_usd: float = DEFAULT_MAX_BUDGET_USD
+    task_timeout: int = DEFAULT_TASK_TIMEOUT
     source: dict[str, str] = field(default_factory=dict)  # {"path", "commit", "origin"}
 
     @property
@@ -100,7 +110,34 @@ def parse(text: str, *, python: str = sys.executable) -> RepoConfig:
     protected = _patterns(build, "protected_paths", DEFAULT_PROTECTED_PATHS)
     if not allowed:
         raise ValidationError(f"{CONFIG_PATH}: build.allowed_paths must not be empty")
-    return RepoConfig(tuple(commands), timeout, allowed, protected)
+    return RepoConfig(
+        tuple(commands),
+        timeout,
+        allowed,
+        protected,
+        max_turns=int(_bounded(build, "max_turns", DEFAULT_MAX_TURNS, MAX_TURNS_LIMIT)),
+        max_budget_usd=float(
+            _bounded(build, "max_budget_usd", DEFAULT_MAX_BUDGET_USD, MAX_BUDGET_USD_LIMIT)
+        ),
+        task_timeout=int(
+            _bounded(build, "task_timeout_seconds", DEFAULT_TASK_TIMEOUT, MAX_TASK_TIMEOUT)
+        ),
+    )
+
+
+def _bounded(table: dict[str, Any], key: str, default: float, limit: float) -> float:
+    """A positive number no larger than ``limit``; an integer unless ``default`` is a float."""
+    value = table.get(key, default)
+    integer = not isinstance(default, float)
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int | float)
+        or (integer and not isinstance(value, int))
+        or not 0 < value <= limit
+    ):
+        kind = "integer" if integer else "number"
+        raise ValidationError(f"{CONFIG_PATH}: build.{key} must be a {kind} in (0, {limit}]")
+    return value
 
 
 def _table(data: dict[str, Any], key: str, *, optional: bool = False) -> dict[str, Any]:
@@ -147,13 +184,7 @@ def load(
         if text is not None:
             config = parse(text, python=python)
             source = {"path": CONFIG_PATH, "commit": commit, "origin": origin}
-            return RepoConfig(
-                config.checks,
-                config.check_timeout,
-                config.allowed_paths,
-                config.protected_paths,
-                source,
-            )
+            return replace(config, source=source)
     raise ValidationError(
         f"no {CONFIG_PATH} in the job's base commit {base_sha[:12]} or in the main checkout's "
         "HEAD; commit one that lists the repository's checks (see docs/getting-started.md). "

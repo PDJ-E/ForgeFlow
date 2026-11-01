@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import io
 import json
+from contextlib import redirect_stderr, redirect_stdout
 from unittest import mock
 
-from forgeflow import discovery, fsutil
+from forgeflow import cli, discovery, fsutil
 from forgeflow.errors import InvalidTransitionError, ValidationError
 from forgeflow.jobs import UNASSIGNED_PROVIDER, JobState
 from forgeflow.store import JobStore
@@ -63,8 +65,26 @@ class DiscoveryTests(GitRepoTestCase):
         self.assertEqual(statuses, ["accepted", "superseded", "accepted"])
         self.assertNotIn("Banner", discovery.render(found))
         self.assertIn(
+            "(2 rejected or superseded item(s) hidden; use --all", discovery.render(found)
+        )
+        self.assertIn(
             "O1 [rejected] Banner - too noisy", discovery.render(found, include_closed=True)
         )
+
+    def test_idea_add_warns_above_the_live_item_threshold(self) -> None:
+        job_id = self.start()
+        for i in range(discovery.MAX_LIVE_ITEMS):
+            discovery.add(self.store, job_id, "requirement", f"req {i}")
+        self.assertIsNone(discovery.live_warning(discovery.load(self.store, job_id)))
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            code = cli.main(["--repo", str(self.repo), "idea", "add", job_id, "risk", "one more"])
+        self.assertEqual(code, 0)
+        self.assertIn("one more", out.getvalue())
+        self.assertIn(f"{discovery.MAX_LIVE_ITEMS + 1} live discovery items", err.getvalue())
+        # Closed items are history, not load: rejecting one brings the count back under.
+        discovery.mark(self.store, job_id, "K1", "rejected")
+        self.assertIsNone(discovery.live_warning(discovery.load(self.store, job_id)))
 
     def test_a_rejected_option_can_be_recorded_directly(self) -> None:
         job_id = self.start()

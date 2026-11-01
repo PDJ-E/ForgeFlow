@@ -26,4 +26,8 @@ argv = ["{python}", "-m", "mypy"]
 [build]
 allowed_paths = ["*"]
 # Changes here are never committed by ForgeFlow; they go to a human.
-protected_paths = [".forge/*", ".github/*", "LICENSE", "ATTRIBUTION.md"]
+# Agent files (ADR 0006 §7): a builder must not plant instructions or hooks for later sessions.
+protected_paths = [
+    ".forge/*", ".github/*", "LICENSE", "ATTRIBUTION.md",
+    ".claude/*", ".agents/*", "CLAUDE.md", "AGENTS.md",
+]

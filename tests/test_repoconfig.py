@@ -9,7 +9,17 @@ import sys
 import unittest
 
 from forgeflow.errors import ValidationError
-from forgeflow.repoconfig import DEFAULT_PROTECTED_PATHS, load, parse
+from forgeflow.repoconfig import (
+    DEFAULT_MAX_BUDGET_USD,
+    DEFAULT_MAX_TURNS,
+    DEFAULT_PROTECTED_PATHS,
+    DEFAULT_TASK_TIMEOUT,
+    MAX_BUDGET_USD_LIMIT,
+    MAX_TASK_TIMEOUT,
+    MAX_TURNS_LIMIT,
+    load,
+    parse,
+)
 from tests.support import GitRepoTestCase, run_git
 
 GOOD = """
@@ -33,6 +43,34 @@ class ParseTests(unittest.TestCase):
         self.assertEqual(config.check_timeout, 30)
         self.assertEqual(config.allowed_paths, ("src/*", "tests/*"))
         self.assertEqual(config.protected_paths, DEFAULT_PROTECTED_PATHS)
+
+    def test_budgets_default_and_parse(self) -> None:
+        config = parse(GOOD)
+        self.assertEqual(
+            (config.max_turns, config.max_budget_usd, config.task_timeout),
+            (DEFAULT_MAX_TURNS, DEFAULT_MAX_BUDGET_USD, DEFAULT_TASK_TIMEOUT),
+        )
+        limits = (
+            f"max_turns = {MAX_TURNS_LIMIT}\nmax_budget_usd = {MAX_BUDGET_USD_LIMIT}\n"
+            f"task_timeout_seconds = {MAX_TASK_TIMEOUT}\n"
+        )
+        config = parse(GOOD + limits)
+        self.assertEqual(
+            (config.max_turns, config.max_budget_usd, config.task_timeout),
+            (MAX_TURNS_LIMIT, MAX_BUDGET_USD_LIMIT, MAX_TASK_TIMEOUT),
+        )
+        self.assertEqual(parse(GOOD + "max_budget_usd = 2\n").max_budget_usd, 2.0)
+
+    def test_budget_rejections_at_each_boundary(self) -> None:
+        bad = {
+            "max_turns": ["0", str(MAX_TURNS_LIMIT + 1), "true", "1.5", "'10'"],
+            "max_budget_usd": ["0", "-1", str(MAX_BUDGET_USD_LIMIT + 0.01), "true", "'5'"],
+            "task_timeout_seconds": ["0", str(MAX_TASK_TIMEOUT + 1), "true", "60.5"],
+        }
+        for key, values in bad.items():
+            for value in values:
+                with self.subTest(key=key, value=value), self.assertRaises(ValidationError):
+                    parse(GOOD + f"{key} = {value}\n")
 
     def test_python_placeholder_defaults_to_this_interpreter(self) -> None:
         self.assertEqual(parse(GOOD).checks[0].argv[0], sys.executable)

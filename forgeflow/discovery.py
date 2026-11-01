@@ -42,6 +42,8 @@ STATUSES = ("proposed", "accepted", "rejected", "superseded")
 LIVE_STATUSES = frozenset({"proposed", "accepted"})
 _EDITABLE = frozenset({JobState.DRAFT})
 MAX_TEXT = 2000
+# More live outcomes than this rarely fit one job (J5 reached 73); see ADR 0006 §6.
+MAX_LIVE_ITEMS = 40
 
 
 @dataclass
@@ -281,6 +283,17 @@ def render(discovery: Discovery, *, include_closed: bool = False) -> str:
     if not discovery.items:
         lines.append("(no outcomes recorded yet)")
     return "\n".join(lines)
+
+
+def live_warning(discovery: Discovery) -> str | None:
+    """A warning when the live (proposed or accepted) outcomes exceed ``MAX_LIVE_ITEMS``."""
+    live = len(discovery.live())
+    if live <= MAX_LIVE_ITEMS:
+        return None
+    return (
+        f"{live} live discovery items (over {MAX_LIVE_ITEMS}): reject or supersede what no "
+        "longer holds, or split the idea into separate jobs"
+    )
 
 
 def accepted_text(items: Iterable[Item]) -> list[str]:

@@ -3,8 +3,11 @@
 Usage (as a provider ``command``): python fake_cli.py <claude|codex> <script.json> <cli args...>
 
 It accepts the arguments ForgeFlow passes to the real CLI, reads the prompt from stdin like
-the real one, and prints output in the format each real CLI was observed to print (Claude:
-one JSON result object; Codex: JSONL events plus the ``-o`` last-message file).
+the real one, and prints output in the format each real CLI was observed to print (Claude
+``--output-format stream-json --verbose``: a ``system/init`` event; per write, one
+``assistant`` message sent as a thinking and a tool_use event that share its id and usage,
+flushed before any ``sleep``; the answer and a ``result`` event. Codex: JSONL events plus the
+``-o`` last-message file).
 
 ``script.json`` holds one step (an object) or a list of steps, one per invocation; a step is
 consumed when used, and the last one repeats. A step may contain:
@@ -13,6 +16,7 @@ consumed when used, and the last one repeats. A step may contain:
 * ``result``: the builder's final message; ``review``: the reviewer's structured answer;
 * ``sleep``: seconds to wait after writing, before answering (interruption tests);
 * ``exit``, ``stderr``, ``is_error``: failure modes; ``sandbox_refusal``: Codex's message;
+* ``limit``: Claude stopped by ``max_turns`` or ``max_budget_usd`` (use with ``exit: 1``);
 * ``cannot_read``: a reviewer that answers but never read the snapshot (no token returned).
 
 A reviewer step's answer gets ``snapshot_token`` (read from the snapshot's token file, as a
@@ -28,6 +32,7 @@ import json
 import os
 import sys
 import time
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -46,6 +51,23 @@ def _step(script: Path) -> dict[str, object]:
 def _log(script: Path, record: dict[str, object]) -> None:
     with open(script.with_suffix(".log"), "a", encoding="utf-8") as fh:
         fh.write(json.dumps(record) + "\n")
+
+
+USAGE = {
+    "input_tokens": 3,
+    "cache_creation_input_tokens": 100,
+    "cache_read_input_tokens": 50,
+    "output_tokens": 20,
+}
+
+
+def _emit(event: dict[str, object]) -> None:
+    print(json.dumps(event), flush=True)  # flushed: a run killed later keeps what it printed
+
+
+def _assistant(message_id: str, content: Mapping[str, object]) -> dict[str, object]:
+    message = {"id": message_id, "role": "assistant", "content": [content], "usage": USAGE}
+    return {"type": "assistant", "message": message}
 
 
 def _option(args: list[str], *names: str) -> str | None:
@@ -96,10 +118,22 @@ def main() -> int:
         "codex_home": os.environ.get("CODEX_HOME"),
     }
     _log(script, {**record, "event": "start"})
-    for rel, content in dict(step.get("writes", {})).items():  # type: ignore[call-overload]
+    writes = dict(step.get("writes", {}))  # type: ignore[call-overload]
+    if cli == "claude":
+        _emit({"type": "system", "subtype": "init", "tools": ["Read", "Edit", "Write"]})
+    for turn, (rel, content) in enumerate(writes.items(), start=1):
         target = workdir / rel
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(str(content), encoding="utf-8")
+        if cli == "claude":
+            tool = {
+                "type": "tool_use",
+                "name": "Write",
+                "input": {"file_path": rel, "content": content},
+            }
+            # Like the real CLI, one API message arrives as several events sharing id and usage.
+            _emit(_assistant(f"msg_{turn}", {"type": "thinking", "thinking": ""}))
+            _emit(_assistant(f"msg_{turn}", tool))
     time.sleep(float(str(step.get("sleep", 0))))  # after the writes: partial work stays behind
     if step.get("stderr"):
         sys.stderr.write(str(step["stderr"]) + "\n")
@@ -113,23 +147,29 @@ def main() -> int:
         review = {"snapshot_token": token, "inspection_complete": True, **review}
     result = str(step.get("result", "done"))
     if cli == "claude":
+        answer = json.dumps(review) if review is not None else result
+        _emit(_assistant(f"msg_{len(writes) + 1}", {"type": "text", "text": answer}))
         output = {
             "type": "result",
             "subtype": "error_during_execution" if step.get("is_error") else "success",
             "is_error": bool(step.get("is_error")),
-            "result": json.dumps(review) if review is not None else result,
+            "num_turns": len(writes) + 1,
+            "result": answer,
             "total_cost_usd": 0.0123,
-            "usage": {
-                "input_tokens": 3,
-                "cache_creation_input_tokens": 100,
-                "cache_read_input_tokens": 50,
-                "output_tokens": 20,
-            },
+            "usage": USAGE,
             "permission_denials": step.get("denials", []),
         }
+        if step.get("limit"):  # as Claude Code 2.1.316 reports either limit being reached
+            output.update(
+                subtype=f"error_{step['limit']}",
+                is_error=True,
+                terminal_reason="max_turns" if step["limit"] == "max_turns" else "budget_exhausted",
+                errors=[f"Reached maximum {step['limit']}"],
+                result=None,
+            )
         if "--json-schema" in args:
             output["structured_output"] = review
-        print(json.dumps(output))
+        _emit(output)
     else:
         print(json.dumps({"type": "thread.started", "thread_id": "fake"}))
         if step.get("sandbox_refusal"):

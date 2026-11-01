@@ -44,3 +44,7 @@ coverage/
 Thumbs.db
 .vscode/
 .idea/
+
+# Personal Claude Code overrides (never shared)
+CLAUDE.local.md
+.claude/settings.local.json
