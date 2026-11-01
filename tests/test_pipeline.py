@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+import tomllib
 import unittest
 from pathlib import Path
 from typing import Any
@@ -23,9 +24,10 @@ from forgeflow.errors import InvalidTransitionError, ValidationError
 from forgeflow.jobs import JobState
 from forgeflow.pipeline import acceptance_criteria, feedback_for
 from forgeflow.providers import ClaudeCodeProvider, CodexProvider, ProviderUnavailableError
+from forgeflow.repoconfig import CONFIG_PATH
 from forgeflow.worktree import WORKTREES_RELATIVE
-from tests.pipeline_support import APPROVE, PipelineTestCase, request_changes
-from tests.support import run_git
+from tests.pipeline_support import APPROVE, CONFIG, PipelineTestCase, request_changes
+from tests.support import PROJECT_ROOT, run_git
 
 S = JobState
 HELLO = {"writes": {"greet.txt": "hello\n"}, "result": "said hello"}
@@ -224,6 +226,28 @@ class SafetyTests(PipelineTestCase):
         self.assertIn(".forge/forgeflow.toml", status)  # left exactly where it was
         self.assertEqual((worktree / ".forge" / "forgeflow.toml").read_text("utf-8"), "[checks]\n")
         self.assertIn("scope-violation", [e.kind for e in job.evidence])
+        self.assertEqual(self.fake_cli_log(reviewer), [])
+
+    def test_this_repositorys_agent_files_are_protected_from_the_builder(self) -> None:
+        # ForgeFlow's own committed configuration, applied to the test repository.
+        build = tomllib.loads((PROJECT_ROOT / CONFIG_PATH).read_text("utf-8"))["build"]
+        config = (
+            f"{CONFIG}\n[build]\nallowed_paths = {json.dumps(build['allowed_paths'])}\n"
+            f"protected_paths = {json.dumps(build['protected_paths'])}\n"
+        )
+        (self.repo / CONFIG_PATH).write_text(config, encoding="utf-8")
+        run_git(self.repo, "commit", "-q", "-am", "protect agent files")
+        run_git(self.repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+        job = self.handed_off_job()
+        planted = [".claude/settings.json", ".claude/hooks/x.sh", ".agents/a.md", "CLAUDE.md",
+                   "AGENTS.md"]  # fmt: skip
+        rogue = {"writes": {"greet.txt": "hello\n", **dict.fromkeys(planted, "x\n")}}
+        factory, _, reviewer = self.providers(rogue, {"review": APPROVE})
+        job = self.run_pipeline(job.job_id, factory)
+        self.assertEqual(job.state, S.NEEDS_HUMAN)
+        [violation] = [e for e in job.evidence if e.kind == "scope-violation"]
+        payload = self.store.evidence_payload(job, violation)
+        self.assertEqual(sorted(payload["protected"]), sorted(planted))
         self.assertEqual(self.fake_cli_log(reviewer), [])
 
     def test_an_unavailable_reviewer_blocks_before_anything_is_dispatched(self) -> None:

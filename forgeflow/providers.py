@@ -7,8 +7,8 @@ Code 2.1.311, Codex CLI 0.164.0, Windows 11) before they were written; see ADR 0
 * **Claude Code builder:** ``claude -p --restricted --tools Read,Edit,Write,Glob,Grep
   --permission-mode acceptEdits --permission-prompts none --strict-mcp-config``. It has no
   command-running tool at all, its file tools are confined to the worktree (a write outside is
-  denied and reported in ``permission_denials``), and user/project settings, hooks and MCP
-  servers are not loaded.
+  denied and reported in ``permission_denials``), and user/project settings, hooks, MCP
+  servers, ``CLAUDE.md`` and project agents/skills are not loaded (re-probed on 2.1.316).
 * **Claude Code reviewer:** the same with ``--tools Read,Glob,Grep --permission-mode dontAsk``
   and ``--json-schema`` (the answer arrives in ``structured_output``).
 * **Codex builder:** ``codex exec -s workspace-write -C <worktree>``; **reviewer:** ``-s
