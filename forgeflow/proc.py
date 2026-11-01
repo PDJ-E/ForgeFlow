@@ -23,6 +23,8 @@ import signal
 import socket
 import subprocess
 import sys
+import threading
+import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -47,11 +49,13 @@ KILL_GRACE = 5.0  # seconds to collect output after the process tree was killed
 
 # "scheme://user:secret@host" -> "scheme://host". Tokens are often sent as the user name alone.
 _URL_USERINFO = re.compile(r"(?i)\b([a-z][a-z0-9+.-]*://)[^/\s?#]*@")
+# Anthropic API keys and GitHub tokens (classic and fine-grained) appearing on their own.
+_TOKENS = re.compile(r"\b(?:sk-ant-[A-Za-z0-9_-]+|gh[pousr]_[A-Za-z0-9]+|github_pat_[A-Za-z0-9_]+)")
 
 
 def redact_credentials(text: str) -> str:
-    """Remove user names, passwords and tokens embedded in URLs anywhere in ``text``."""
-    return _URL_USERINFO.sub(r"\1", text)
+    """Remove URL credentials and recognisable API keys/tokens anywhere in ``text``."""
+    return _TOKENS.sub("[redacted]", _URL_USERINFO.sub(r"\1", text))
 
 
 @dataclass(frozen=True)
@@ -101,6 +105,7 @@ class TrackedRunner(Protocol):
         input_text: str | None = None,
         env: Mapping[str, str] | None = None,
         on_start: Callable[[int], None] | None = None,
+        on_stdout_line: Callable[[str], None] | None = None,
     ) -> CommandResult: ...
 
 
@@ -128,6 +133,7 @@ def run_tracked(
     input_text: str | None = None,
     env: Mapping[str, str] | None = None,
     on_start: Callable[[int], None] | None = None,
+    on_stdout_line: Callable[[str], None] | None = None,
 ) -> CommandResult:
     """``run_command`` that calls ``on_start(pid)`` once the child is inside its container.
 
@@ -135,6 +141,10 @@ def run_tracked(
     can start while one still runs. If ``on_start`` raises, the child is killed and the error
     propagates. On Windows the child dies with this process (kill-on-close Job Object), so an
     orchestrator that is killed takes its provider with it.
+
+    With ``on_stdout_line`` each line of stdout is passed on as it arrives (on a reader thread),
+    so a caller can persist a stream that a timeout would otherwise cut off. The result's
+    ``stdout`` still holds everything read, a killed run included.
     """
     if not argv:
         raise ValueError("argv must not be empty")
@@ -166,6 +176,8 @@ def run_tracked(
     with _ProcessTree(proc) as tree:
         if on_start is not None:
             on_start(proc.pid)  # an exception here leaves the with block, which kills the tree
+        if on_stdout_line is not None:
+            return _run_streaming(proc, tree, tuple(argv), input_text, timeout, on_stdout_line)
         try:
             stdout, stderr = proc.communicate(input=input_text, timeout=timeout)
         except subprocess.TimeoutExpired:
@@ -173,6 +185,67 @@ def run_tracked(
             stdout, stderr = _drain(proc)
             return CommandResult(tuple(argv), None, stdout, stderr, timed_out=True)
     return CommandResult(tuple(argv), proc.returncode, stdout or "", stderr or "")
+
+
+def _run_streaming(
+    proc: subprocess.Popen[str],
+    tree: _ProcessTree,
+    argv: tuple[str, ...],
+    input_text: str | None,
+    timeout: float,
+    on_line: Callable[[str], None],
+) -> CommandResult:
+    """Feed stdin, read stdout line by line and stderr whole, each on its own thread."""
+    stdin, stdout, stderr = proc.stdin, proc.stdout, proc.stderr
+    if stdout is None or stderr is None:
+        raise ValueError("stdout and stderr must be pipes")
+    out: list[str] = []
+    err: list[str] = []
+
+    def feed() -> None:
+        if stdin is None:
+            return
+        with contextlib.suppress(OSError):  # the child may exit without reading everything
+            stdin.write(input_text or "")
+        with contextlib.suppress(OSError):
+            stdin.close()
+
+    def read_out() -> None:
+        deliver = True
+        for line in stdout:
+            out.append(line)
+            if deliver:
+                try:
+                    on_line(line)
+                except Exception:  # noqa: BLE001 - a broken sink must not stop the drain
+                    deliver = False
+
+    def read_err() -> None:
+        err.append(stderr.read())
+
+    workers = [read_out, read_err] + ([feed] if input_text is not None else [])
+    threads = [threading.Thread(target=work, daemon=True) for work in workers]
+    for thread in threads:
+        thread.start()
+    timed_out = False
+    try:
+        proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        tree.kill()
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            proc.wait(timeout=KILL_GRACE)
+    # A descendant that escaped the container may still hold the pipes: do not wait forever,
+    # and leave a pipe whose reader is still blocked open (closing it would deadlock on Windows).
+    deadline = time.monotonic() + KILL_GRACE
+    for thread in threads:
+        thread.join(timeout=max(0.0, deadline - time.monotonic()))
+    for thread, pipe in zip(threads, (stdout, stderr, stdin), strict=False):
+        if not thread.is_alive() and pipe is not None:
+            with contextlib.suppress(OSError):
+                pipe.close()
+    code = None if timed_out else proc.returncode
+    return CommandResult(argv, code, "".join(out), "".join(err), timed_out=timed_out)
 
 
 def _drain(proc: subprocess.Popen[str]) -> tuple[str, str]:

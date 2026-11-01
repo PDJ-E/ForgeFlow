@@ -32,13 +32,15 @@ import hashlib
 import json
 import os
 import re
+import secrets
 import sys
 import tempfile
+import time
 from abc import ABC, abstractmethod
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field
 from pathlib import Path, PurePosixPath
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TextIO
 
 from forgeflow import fsutil, prompts
 from forgeflow.codex_runtime import (
@@ -67,6 +69,7 @@ ROLES = ("builder", "reviewer")
 WRITE_OPERATIONS = frozenset({"write", "git-commit"})
 KNOWN_OPERATIONS = frozenset({"read", "run-validation", *WRITE_OPERATIONS})
 _TAIL = 4000  # characters of provider output kept as evidence
+MAX_STREAM_BYTES = 5_000_000  # recorded per invocation; the rest is dropped with a marker
 
 # The four execution policies are data, not four implementations.
 NAMED_POLICIES: dict[str, Policy] = {
@@ -112,6 +115,7 @@ class ProviderTask:
     # reviewer: snapshot file whose (unprompted) content proves the snapshot was readable
     review_token_file: str = ""
     model: str | None = None  # passed through to the CLI only when set
+    stream_path: str = ""  # Claude: where the event stream is recorded as it arrives
 
     def validate(self) -> None:
         if self.role not in ROLES:
@@ -204,6 +208,8 @@ class ProviderResult:
     notes: tuple[str, ...] = ()  # e.g. denied tool calls, failed writes, sandbox refusals
     exit_code: int | None = None
     stderr_tail: str = ""
+    # Claude: turns, tools used, last activity and the stream file, from the event stream
+    telemetry: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -366,6 +372,7 @@ class _CliProvider(Provider):
         prompt: str,
         *,
         env: Mapping[str, str] | None = None,
+        on_stdout_line: Callable[[str], None] | None = None,
     ) -> CommandResult:
         task.validate()
         if lease.job_id != task.job_id or not lease.active:
@@ -374,6 +381,7 @@ class _CliProvider(Provider):
         def record(pid: int) -> None:
             lease.set_worker_pid(pid)  # before the provider does any work
 
+        streaming = {} if on_stdout_line is None else {"on_stdout_line": on_stdout_line}
         try:
             return self.runner(
                 argv,
@@ -382,6 +390,7 @@ class _CliProvider(Provider):
                 input_text=prompt,
                 on_start=record,
                 env=env,
+                **streaming,
             )
         except ToolNotFoundError as exc:
             raise ProviderUnavailableError(f"{self.name}: {exc}") from exc
@@ -426,10 +435,12 @@ class ClaudeCodeProvider(_CliProvider):
         "--strict-mcp-config",
         "--permission-prompts",
         "--no-session-persistence",
+        "--verbose",
     )
     _common_flags = (
         "--print",
         "--output-format",
+        "--verbose",
         "--permission-mode",
         "--tools",
         "--restricted",
@@ -469,7 +480,8 @@ class ClaudeCodeProvider(_CliProvider):
             *self._argv0(),
             "-p",
             "--output-format",
-            "json",
+            "stream-json",
+            "--verbose",
             "--no-session-persistence",
             "--restricted",
             "--strict-mcp-config",
@@ -497,21 +509,29 @@ class ClaudeCodeProvider(_CliProvider):
             if task.role == "builder"
             else prompts.reviewer_prompt(task)
         )
-        result = self._run(task, lease, self.argv(task), prompt)
+        with _StreamLog(task.stream_path) as stream:
+            result = self._run(task, lease, self.argv(task), prompt, on_stdout_line=stream.write)
+        events = _jsonl(result.stdout)
+        telemetry = _claude_telemetry(events, task.stream_path)
         if result.timed_out:
-            return self._result(task, result, summary="timed out", usage=UsageReport())
-        try:
-            data = json.loads(result.stdout)
-            if not isinstance(data, dict):
-                raise ValueError("not an object")
-        except ValueError:
+            activity = telemetry.get("last_activity")
+            return self._result(
+                task,
+                result,
+                summary="timed out" + (f"; last activity: {activity}" if activity else ""),
+                usage=_claude_partial_usage(events),
+                telemetry=telemetry,
+            )
+        data = next((e for e in reversed(events) if e.get("type") == "result"), None)
+        if data is None:
             detail = _first_line(result.stderr) or _first_line(result.stdout) or "no output"
             return self._result(
                 task,
                 result,
                 status="failed",
-                summary=f"claude did not return its JSON result: {detail}",
-                usage=UsageReport(),
+                summary=f"claude did not return its result event: {detail}",
+                usage=_claude_partial_usage(events),
+                telemetry=telemetry,
             )
         usage = _claude_usage(data)
         notes = tuple(
@@ -523,10 +543,18 @@ class ClaudeCodeProvider(_CliProvider):
         failed = bool(data.get("is_error")) or data.get("subtype") != "success" or not result.ok
         if failed:
             return self._result(
-                task, result, status="failed", summary=summary, usage=usage, notes=notes
+                task,
+                result,
+                status="failed",
+                summary=summary,
+                usage=usage,
+                notes=notes,
+                telemetry=telemetry,
             )
         if task.role == "builder":
-            return self._result(task, result, summary=summary, usage=usage, notes=notes)
+            return self._result(
+                task, result, summary=summary, usage=usage, notes=notes, telemetry=telemetry
+            )
         verdict, findings, review = interpret_review(self.name, data.get("structured_output"))
         return self._result(
             task,
@@ -537,7 +565,106 @@ class ClaudeCodeProvider(_CliProvider):
             verdict=verdict,
             findings=findings,
             review=review,
+            telemetry=telemetry,
         )
+
+
+class _StreamLog:
+    """Appends each stream line, credentials redacted, to ``path`` as it arrives (flushed, so a
+    killed run keeps its record). Stops at ``MAX_STREAM_BYTES`` with one marker line. A write
+    failure drops the record, never the run."""
+
+    def __init__(self, path: str) -> None:
+        self.path = path
+        self.written = 0
+        self.file: TextIO | None = None
+
+    def __enter__(self) -> _StreamLog:
+        if self.path:
+            try:
+                Path(self.path).parent.mkdir(parents=True, exist_ok=True)
+                self.file = open(self.path, "a", encoding="utf-8", newline="\n")  # noqa: SIM115
+            except OSError:
+                self.file = None
+        return self
+
+    def write(self, line: str) -> None:
+        file = self.file
+        if file is None:
+            return
+        data = redact_credentials(line if line.endswith("\n") else line + "\n")
+        size = len(data.encode("utf-8"))
+        try:
+            if self.written + size > MAX_STREAM_BYTES:
+                marker = {"forgeflow": f"stream truncated after {self.written} bytes"}
+                file.write(json.dumps(marker) + "\n")
+                self._close()
+                return
+            file.write(data)
+            file.flush()
+            self.written += size
+        except (OSError, ValueError):  # ValueError: closed by __exit__ under a late reader
+            self.file = None
+
+    def _close(self) -> None:
+        file, self.file = self.file, None
+        if file is not None:
+            file.close()
+
+    def __exit__(self, *exc: object) -> None:
+        self._close()
+
+
+_CLAUDE_INPUT_KEYS = ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens")
+
+
+def _assistant_messages(events: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """Assistant API messages by id; the CLI may split one message over several events."""
+    messages: dict[str, dict[str, Any]] = {}
+    for event in events:
+        message = event.get("message")
+        if event.get("type") == "assistant" and isinstance(message, dict):
+            key = str(message.get("id") or len(messages))
+            entry = messages.setdefault(key, {"content": [], "usage": None})
+            entry["content"] += [c for c in message.get("content") or [] if isinstance(c, dict)]
+            if isinstance(message.get("usage"), dict):
+                entry["usage"] = message["usage"]
+    return messages
+
+
+def _claude_telemetry(events: list[dict[str, Any]], stream_path: str) -> dict[str, Any]:
+    messages = _assistant_messages(events)
+    tools: dict[str, int] = {}
+    last = ""
+    for message in messages.values():
+        for item in message["content"]:
+            if item.get("type") == "tool_use":
+                name = str(item.get("name", "?"))
+                tools[name] = tools.get(name, 0) + 1
+                last = f"{name} {json.dumps(item.get('input', {}))[:200]}"
+            elif item.get("type") == "text" and str(item.get("text", "")).strip():
+                last = f"text: {str(item['text']).strip()[:200]}"
+    result: dict[str, Any] = next((e for e in reversed(events) if e.get("type") == "result"), {})
+    turns = result.get("num_turns")
+    return {
+        "turns": turns if isinstance(turns, int) else len(messages),
+        "tools_used": tools,
+        "last_activity": redact_credentials(last),
+        "stream": Path(stream_path).name if stream_path else "",
+    }
+
+
+def _claude_partial_usage(events: list[dict[str, Any]]) -> UsageReport:
+    """Tokens of the assistant messages seen before the run ended without a result event."""
+    usages = [m["usage"] for m in _assistant_messages(events).values() if m["usage"]]
+    if not usages:
+        return UsageReport(source="claude stream ended before any usage was reported")
+    return UsageReport(
+        tokens="measured",
+        input_tokens=sum(int(u.get(k) or 0) for u in usages for k in _CLAUDE_INPUT_KEYS),
+        output_tokens=sum(int(u.get("output_tokens") or 0) for u in usages),
+        source="claude stream-json assistant messages before the run ended (partial; no cost)",
+    )
 
 
 def _claude_usage(data: dict[str, Any]) -> UsageReport:
@@ -545,16 +672,15 @@ def _claude_usage(data: dict[str, Any]) -> UsageReport:
     if not isinstance(usage, dict):
         return UsageReport(source="claude reported no usage")
     cost = data.get("total_cost_usd")
-    keys = ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens")
     return UsageReport(
         tokens="measured",
-        input_tokens=sum(int(usage.get(k) or 0) for k in keys),
+        input_tokens=sum(int(usage.get(k) or 0) for k in _CLAUDE_INPUT_KEYS),
         output_tokens=int(usage.get("output_tokens") or 0),
         # Claude Code prices usage at list rates; on a subscription nothing is billed per call.
         cost="api-equivalent-estimate" if isinstance(cost, int | float) else "unavailable",
         cost_usd=float(cost) if isinstance(cost, int | float) else None,
-        source="claude -p --output-format json (input includes cache reads and writes)",
-        raw={k: usage.get(k) for k in (*keys, "output_tokens")},
+        source="claude -p stream-json result event (input includes cache reads and writes)",
+        raw={k: usage.get(k) for k in (*_CLAUDE_INPUT_KEYS, "output_tokens")},
     )
 
 
@@ -925,6 +1051,11 @@ def build_task(
         protected_paths=protected_paths,
         feedback=feedback,
         model=model,
+        stream_path=str(
+            store.job_dir(job_id)
+            / "evidence"
+            / f"stream-{role}-{time.strftime('%Y%m%dT%H%M%S')}-{secrets.token_hex(3)}.jsonl"
+        ),
     )
     task.validate()
     return task

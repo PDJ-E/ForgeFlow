@@ -26,10 +26,12 @@ from forgeflow.providers import (
     ProviderTask,
     ProviderUnavailableError,
     UsageReport,
+    _StreamLog,
+    build_task,
     interpret_review,
     validate_policy,
 )
-from tests.support import FAKE_CLI, rmtree
+from tests.support import FAKE_CLI, GitRepoTestCase, rmtree
 
 
 def _wait_dead(pid: int, seconds: float = 10) -> bool:
@@ -311,9 +313,69 @@ class ExecutionTests(unittest.TestCase):
         self.assertEqual(argv[argv.index("--tools") + 1], "Read,Edit,Write,Glob,Grep")
         self.assertEqual(argv[argv.index("--permission-mode") + 1], "acceptEdits")
         self.assertEqual(argv[argv.index("--permission-prompts") + 1], "none")
+        self.assertEqual(argv[argv.index("--output-format") + 1], "stream-json")
+        self.assertIn("--verbose", argv)
         self.assertNotIn("Bash", " ".join(argv))
         self.assertIn("# Plan", start["prompt"], "the approved plan travels on stdin")
         self.assertEqual(self.lease.pids, [start["pid"], None])
+        self.assertEqual(result.telemetry["turns"], 2)
+        self.assertEqual(result.telemetry["tools_used"], {"Write": 1})
+
+    def test_claude_stream_is_written_incrementally_redacted_and_bounded(self) -> None:
+        stream = self.dir / "evidence" / "stream-builder.jsonl"
+        leaky = "https://x-access-token:ghs_SECRET1@github.com/o/r sk-ant-api03-SECRET2"
+        command = self.cli("claude", {"writes": {"src/a.py": leaky}})
+        result = self.execute(
+            ClaudeCodeProvider(command=command), self.task(stream_path=str(stream))
+        )
+        text = stream.read_text("utf-8")
+        types = [json.loads(line)["type"] for line in text.splitlines()]
+        self.assertEqual(types, ["system", "assistant", "assistant", "assistant", "result"])
+        self.assertNotIn("SECRET", text)
+        self.assertEqual(result.telemetry["stream"], "stream-builder.jsonl")
+
+        with mock.patch("forgeflow.providers.MAX_STREAM_BYTES", 300):
+            big = self.dir / "evidence" / "stream-big.jsonl"
+            writes = {f"src/{i}.py": "x" * 200 for i in range(5)}
+            command = self.cli("claude", {"writes": writes})
+            result = self.execute(
+                ClaudeCodeProvider(command=command), self.task(stream_path=str(big))
+            )
+        self.assertEqual(result.status, "succeeded", "the cap limits the record, not the run")
+        lines = big.read_text("utf-8").splitlines()
+        self.assertLessEqual(sum(len(line) + 1 for line in lines[:-1]), 300)
+        self.assertIn("truncated", json.loads(lines[-1])["forgeflow"])
+
+    def test_an_unwritable_stream_record_never_fails_the_run(self) -> None:
+        blocker = self.dir / "not-a-directory"
+        blocker.write_text("", encoding="utf-8")
+        command = self.cli("claude", {"writes": {"src/a.py": "x\n"}})
+        task = self.task(stream_path=str(blocker / "stream.jsonl"))
+        self.assertEqual(
+            self.execute(ClaudeCodeProvider(command=command), task).status, "succeeded"
+        )
+        with _StreamLog(str(self.dir / "late.jsonl")) as log:
+            log.write("{}\n")
+        log.write("{}\n")  # a reader thread outliving the run: dropped, not raised
+
+    def test_a_claude_run_killed_mid_stream_keeps_partial_telemetry(self) -> None:
+        stream = self.dir / "evidence" / "stream-killed.jsonl"
+        command = self.cli(
+            "claude", {"writes": {"src/a.py": "x\n", "src/b.py": "y\n"}, "sleep": 30}
+        )
+        task = self.task(timeout_seconds=2, stream_path=str(stream))
+        result = self.execute(ClaudeCodeProvider(command=command), task)
+        self.assertEqual(result.status, "timed_out")
+        self.assertEqual(result.usage.tokens, "measured")
+        self.assertEqual((result.usage.input_tokens, result.usage.output_tokens), (306, 40))
+        self.assertIn("partial", result.usage.source)
+        self.assertEqual(result.telemetry["turns"], 2)
+        self.assertEqual(result.telemetry["tools_used"], {"Write": 2})
+        self.assertIn("Write", result.telemetry["last_activity"])
+        self.assertIn("src/b.py", result.telemetry["last_activity"])
+        self.assertEqual(
+            len(stream.read_text("utf-8").splitlines()), 5, "init + 2 events per tool call"
+        )
 
     def test_claude_reviewer_is_read_only_and_findings_decide_the_verdict(self) -> None:
         review = {
@@ -453,6 +515,22 @@ class ExecutionTests(unittest.TestCase):
         for answer in answers:
             with self.subTest(answer), self.assertRaises(ProviderError):
                 interpret_review("x", answer)
+
+
+class StreamEvidenceTests(GitRepoTestCase):
+    def test_each_task_streams_into_the_jobs_evidence_directory(self) -> None:
+        job = self.ready_job()
+        tasks = [
+            build_task(
+                self.store, job.job_id, role=role, acceptance_criteria=("ok",), allowed_paths=("*",)
+            )
+            for role in ("builder", "reviewer", "builder")
+        ]
+        paths = [Path(t.stream_path) for t in tasks]
+        evidence = self.store.job_dir(job.job_id) / "evidence"
+        self.assertEqual({p.parent for p in paths}, {evidence})
+        self.assertEqual(len(set(paths)), 3, "every invocation gets its own stream file")
+        self.assertTrue(paths[1].name.startswith("stream-reviewer-"))
 
 
 class PreflightTests(unittest.TestCase):
