@@ -19,10 +19,12 @@ from pathlib import Path
 from typing import Any
 from unittest import mock
 
+from forgeflow import cli
 from forgeflow.codex_runtime import ISOLATION_ARGS
 from forgeflow.errors import InvalidTransitionError, ValidationError
 from forgeflow.jobs import JobState
 from forgeflow.pipeline import acceptance_criteria, feedback_for
+from forgeflow.proc import run_tracked
 from forgeflow.providers import ClaudeCodeProvider, CodexProvider, ProviderUnavailableError
 from forgeflow.repoconfig import CONFIG_PATH
 from forgeflow.worktree import WORKTREES_RELATIVE
@@ -249,6 +251,69 @@ class SafetyTests(PipelineTestCase):
         payload = self.store.evidence_payload(job, violation)
         self.assertEqual(sorted(payload["protected"]), sorted(planted))
         self.assertEqual(self.fake_cli_log(reviewer), [])
+
+    def run_with_budgets(self, limited: str = "builder", **options: Any) -> tuple[Any, float]:
+        """Claude as ``limited`` (builder or reviewer) stopped by its budget under configured
+        limits, Codex in the other role. Returns the job and Claude's process timeout."""
+        budgets = "\n[build]\nmax_turns = 7\nmax_budget_usd = 1.5\ntask_timeout_seconds = 120\n"
+        (self.repo / CONFIG_PATH).write_text(CONFIG + budgets, encoding="utf-8")
+        run_git(self.repo, "commit", "-q", "-am", "budgets")
+        run_git(self.repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+        timeouts: list[float] = []
+
+        def runner(argv: Any, **kwargs: Any) -> Any:
+            timeouts.append(kwargs["timeout"])
+            return run_tracked(argv, **kwargs)
+
+        job = self.handed_off_job()
+        limit = {"limit": "max_budget_usd", "exit": 1}
+        c = self.fake_cli("claude", {**HELLO, **limit} if limited == "builder" else limit)
+        x = self.fake_cli("codex", {"review": APPROVE} if limited == "builder" else HELLO)
+        claude = ClaudeCodeProvider(command=c, runner=runner)
+        claude.features = {"--max-turns": True, "--max-budget-usd": True}  # fakes skip detect
+        made = {"claude": claude, "codex": CodexProvider(command=x)}
+        other = "codex" if limited == "builder" else "claude"
+        roles = {"builder": "claude", "reviewer": other} if limited == "builder" else {
+            "builder": "codex", "reviewer": "claude"}  # fmt: skip
+        job = self.run_pipeline(job.job_id, made.__getitem__, **roles, **options)
+        self.assertEqual(job.state, S.NEEDS_HUMAN)
+        [start] = [e for e in self.fake_cli_log(c) if e["event"] == "start"]
+        argv = start["argv"]
+        self.assertEqual(argv[argv.index("--max-turns") + 1], "7")
+        self.assertEqual(argv[argv.index("--max-budget-usd") + 1], "1.5")
+        self.assertEqual(job.attempts.build, 1, "a limit is not retried")
+        self.assertIn("budget_exhausted", " ".join(self.lines))
+        self.assertEqual(self.world.pulls, {})
+        [timeout] = timeouts
+        return job, timeout
+
+    def test_configured_budgets_reach_the_builder_and_a_limit_escalates_once(self) -> None:
+        job, timeout = self.run_with_budgets()
+        self.assertEqual(timeout, 120)
+        self.assertEqual(
+            [e.status for e in job.evidence if e.kind == "provider-result"], ["budget_exhausted"]
+        )
+        self.assertNotIn("review", [e.kind for e in job.evidence])
+
+    def test_a_reviewer_gets_the_same_budgets_and_a_limit_escalates_once(self) -> None:
+        job, timeout = self.run_with_budgets("reviewer")
+        self.assertEqual(timeout, 120)
+        self.assertEqual(
+            [e.status for e in job.evidence if e.kind == "review"], ["budget_exhausted"]
+        )
+
+    def test_an_explicit_timeout_overrides_the_configured_one(self) -> None:
+        self.assertEqual(self.run_with_budgets(timeout_seconds=45)[1], 45)
+        for command in ("run", "resume"):
+            with self.subTest(command):
+                self.assertIsNone(cli._parser().parse_args([command, "J1"]).timeout)
+
+    def test_a_zero_timeout_is_refused_not_replaced(self) -> None:
+        job = self.handed_off_job()
+        factory, builder, _ = self.providers(HELLO, {"review": APPROVE})
+        with self.assertRaisesRegex(ValidationError, "timeout"):
+            self.run_pipeline(job.job_id, factory, timeout_seconds=0)
+        self.assertEqual(self.fake_cli_log(builder), [])
 
     def test_an_unavailable_reviewer_blocks_before_anything_is_dispatched(self) -> None:
         job = self.handed_off_job()

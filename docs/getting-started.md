@@ -154,7 +154,7 @@ allowed_paths = ["*"]                                  # what the builder may ch
 protected_paths = [".forge/*", ".github/workflows/*"]  # the default; changes here go to you
 max_turns = 100              # per provider invocation (default 100, at most 500)
 max_budget_usd = 5.0         # per invocation, API-equivalent (default 5.0, at most 100)
-task_timeout_seconds = 1800  # per invocation (default 1800, at most 14400)
+task_timeout_seconds = 1800  # per invocation (default 1800, at most 14400); run/resume --timeout override it
 ```
 
 The turn and budget limits are passed to Claude Code as `--max-turns` / `--max-budget-usd` only when its `--help` lists them (Claude Code 2.1.316 lists `--max-budget-usd` but not `--max-turns`, so there only the budget is passed). A run stopped by either limit is reported as `budget_exhausted` and goes to you; it is not retried.

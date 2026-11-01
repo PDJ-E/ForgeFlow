@@ -35,6 +35,7 @@ from __future__ import annotations
 import re
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import Any
 
 from forgeflow import repoconfig
 from forgeflow.board import BoardListener
@@ -83,7 +84,7 @@ class RunOptions:
     reason: str = ""  # required to continue a job that waits for a human
     builder_model: str | None = None
     reviewer_model: str | None = None
-    timeout_seconds: int = 1800
+    timeout_seconds: int | None = None  # per provider run; None: [build] task_timeout_seconds
 
 
 @dataclass
@@ -98,6 +99,16 @@ class Context:
     github: GitHubClient | None
     report: Reporter
     lease: LeaseHandle | None = None
+
+    def budgets(self) -> dict[str, Any]:
+        """Per-invocation limits from the repository's configuration; --timeout overrides."""
+        return {
+            "timeout_seconds": self.config.task_timeout
+            if self.options.timeout_seconds is None
+            else self.options.timeout_seconds,
+            "max_turns": self.config.max_turns,
+            "max_budget_usd": self.config.max_budget_usd,
+        }
 
     def held(self) -> LeaseHandle:
         if self.lease is None:
@@ -320,7 +331,7 @@ def _build(ctx: Context) -> str | None:
         allowed_paths=ctx.config.allowed_paths,
         protected_paths=ctx.config.protected_paths,
         validation_commands=ctx.config.argv_list,
-        timeout_seconds=ctx.options.timeout_seconds,
+        **ctx.budgets(),
         feedback=feedback_for(ctx.store, job),
         model=ctx.options.builder_model,
     )
@@ -475,7 +486,7 @@ def _review(ctx: Context) -> str | None:
         role="reviewer",
         acceptance_criteria=ctx.criteria,
         validation_commands=ctx.config.argv_list,
-        timeout_seconds=ctx.options.timeout_seconds,
+        **ctx.budgets(),
         model=ctx.options.reviewer_model,
     )
     try:
