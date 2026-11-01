@@ -58,7 +58,7 @@ from forgeflow.errors import (
     ValidationError,
 )
 from forgeflow.github import GitHubClient
-from forgeflow.gitrepo import default_base_ref, resolve_commit
+from forgeflow.gitrepo import default_base_ref, porcelain_status, resolve_commit
 from forgeflow.jobs import UNASSIGNED_PROVIDER, Evidence, Job, JobState
 from forgeflow.providers import REAL_PROVIDERS, Provider, ProviderResult, ProviderTask, build_task
 from forgeflow.store import JobStore, LeaseHandle
@@ -70,6 +70,12 @@ Reporter = Callable[[str], None]
 _CRITERION = re.compile(r"^\s*[-*] \[[ xX]\] (.+?)\s*$", re.MULTILINE)
 _FEEDBACK_TAIL = 1500  # characters of a failed check's output passed back to the builder
 MAX_TASK_ATTEMPTS = 3  # builder runs per plan task and round while its checks fail
+INTERRUPTED_NOTE = (
+    "Your previous run was interrupted. Its partial, uncommitted work is still in the worktree: "
+    "review it and finish the job."
+)
+# A reviewer finding as providers.interpret_review writes it: "[major] path/to/file: issue"
+_FINDING_FILE = re.compile(r"^\[[^\]]*\] (.+?): ")
 
 
 def real_provider(name: str) -> Provider:
@@ -371,14 +377,30 @@ def _build_tasks(ctx: Context, parts: design.PlanParts) -> str | None:
     store = ctx.store
     job = ctx.load()
     round_no = job.attempts.build + 1
-    feedback = feedback_for(store, job)
-    done: list[str] = []
-    for index, plan_task in enumerate(parts.tasks):
+    todo = round_tasks(store, job, parts)
+    done = [t.id for t in parts.tasks if t not in todo]
+    # The generic "finish the job" note would mislead later tasks; only the resumed one gets it.
+    feedback = tuple(item for item in feedback_for(store, job) if item != INTERRUPTED_NOTE)
+    first = feedback
+    if job.state is S.INTERRUPTED and todo:
+        first = (_resume_note(ctx, todo[0].id), *feedback)
+    # Recorded before the round starts, so a kill can never leave a round without its tasks.
+    store.record_evidence(
+        ctx.job_id,
+        "task-round",
+        "planned",
+        {"round": round_no, "tasks": [t.id for t in todo], "done": done},
+        mocked=False,
+    )
+    start_build(store, ctx.held(), ctx.builder, _builder_task(ctx, parts.tasks[0].id, (), ()))
+    if done:
+        ctx.report(f"round {round_no}: building {', '.join(t.id for t in todo) or 'nothing'}; "
+                   f"done: {', '.join(done)}")  # fmt: skip
+    for index, plan_task in enumerate(todo):
         retry: tuple[str, ...] = ()
         for attempt in range(1, MAX_TASK_ATTEMPTS + 1):
-            task = _builder_task(ctx, plan_task.id, tuple(done), feedback + retry)
-            if index == 0 and attempt == 1:
-                start_build(store, ctx.held(), ctx.builder, task)
+            given = first if index == 0 and attempt == 1 else feedback
+            task = _builder_task(ctx, plan_task.id, tuple(done), given + retry)
             ctx.report(
                 f"round {round_no}: {plan_task.id} ({plan_task.title}) attempt {attempt}: "
                 f"building with {ctx.builder.name}"
@@ -414,6 +436,87 @@ def _build_tasks(ctx: Context, parts: design.PlanParts) -> str | None:
         done.append(plan_task.id)
     store.transition(ctx.job_id, S.VERIFYING, lease_token=ctx.token)
     return "verify"
+
+
+def round_tasks(store: JobStore, job: Job, parts: design.PlanParts) -> list[design.PlanTask]:
+    """The plan tasks a new round builds, decided from the record (ADR 0006 §2).
+
+    Continuing (after an interruption, or a human's go-ahead on an escalated job): the tasks of
+    the latest ``task-round`` without a passing ``task-result`` since, so a kill or timeout costs
+    at most the task it hit. An interrupted round whose tasks all passed builds nothing more.
+    Rework (failed final checks, review findings, the owner's note): only the tasks the open
+    findings name, by id (``T2``) or by a file on the task's ``Files:`` line; all tasks when any
+    finding names none.
+    """
+    if job.state in (S.INTERRUPTED, S.READY):
+        unfinished = _unfinished(store, job, parts)
+        if unfinished or job.state is S.INTERRUPTED:
+            return unfinished
+    return _named_by_findings(store, job, parts)
+
+
+def _payload(store: JobStore, job: Job, evidence: Evidence) -> dict[str, Any]:
+    try:
+        return store.evidence_payload(job, evidence)
+    except EvidenceError:
+        return {}  # unreadable: the task counts as not done, the finding as naming no task
+
+
+def _unfinished(store: JobStore, job: Job, parts: design.PlanParts) -> list[design.PlanTask]:
+    # Only rounds that started count; a planned round BUILDING refused never ran.
+    rounds = [
+        p
+        for e in job.evidence
+        if e.kind == "task-round"
+        for p in [_payload(store, job, e)]
+        if p.get("round", job.attempts.build) <= job.attempts.build
+    ]
+    latest_round = rounds[-1] if rounds else {}
+    since = latest_round.get("round", job.attempts.build)  # unreadable: count no older pass
+    planned = latest_round.get("tasks", [t.id for t in parts.tasks])
+    passed = {
+        _payload(store, job, e).get("task")
+        for e in job.evidence
+        if e.kind == "task-result" and e.status == "passed" and e.build_round >= since
+    }
+    return [t for t in parts.tasks if t.id in planned and t.id not in passed]
+
+
+def _named_by_findings(store: JobStore, job: Job, parts: design.PlanParts) -> list[design.PlanTask]:
+    texts: list[str] = []
+    for evidence in job.evidence:
+        if evidence.build_round != job.attempts.build:
+            continue
+        payload = _payload(store, job, evidence)
+        if evidence.kind == "review" and evidence.status == "request-changes":
+            texts += [str(f) for f in payload.get("findings", [])] or [""]
+        elif evidence.kind == "human-feedback":
+            texts.append(str(payload.get("note", "")))
+        elif evidence.kind == "checks" and evidence.status == "failed":
+            texts.append("")  # the final checks name no task
+    named: set[str] = set()
+    for text in texts:
+        found = {t.id for t in parts.tasks if re.search(rf"\b{t.id}\b", text)}
+        file = _FINDING_FILE.match(text)
+        if file:
+            found |= {t.id for t in parts.tasks if file.group(1) in t.files}
+        if not found:
+            return list(parts.tasks)
+        named |= found
+    return [t for t in parts.tasks if t.id in named] or list(parts.tasks)
+
+
+def _resume_note(ctx: Context, task_id: str) -> str:
+    worktree = ctx.store.job_worktree(ctx.load())
+    dirty = bool(porcelain_status(worktree))
+    ctx.report(f"resuming at {task_id}" + (" with its partial work" if dirty else ""))
+    partial = (
+        "Its partial, uncommitted work is still in the worktree (see `git status`): review it "
+        f"and finish {task_id}."
+        if dirty
+        else "It left no uncommitted work."
+    )
+    return f"Your previous run of {task_id} was interrupted. {partial}"
 
 
 def _builder_task(
@@ -490,10 +593,7 @@ def feedback_for(store: JobStore, job: Job) -> tuple[str, ...]:
     previous = job.attempts.build - 1 if interrupted else job.attempts.build
     items: list[str] = []
     if interrupted:
-        items.append(
-            "Your previous run was interrupted. Its partial, uncommitted work is still in the "
-            "worktree: review it and finish the job."
-        )
+        items.append(INTERRUPTED_NOTE)
     for evidence in job.evidence:
         if evidence.build_round != previous:
             continue

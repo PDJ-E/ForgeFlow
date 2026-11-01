@@ -15,11 +15,12 @@ import subprocess
 import sys
 import tomllib
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 from unittest import mock
 
-from forgeflow import cli
+from forgeflow import cli, design, dispatch, pipeline
 from forgeflow.codex_runtime import ISOLATION_ARGS
 from forgeflow.errors import InvalidTransitionError, ValidationError
 from forgeflow.jobs import JobState
@@ -237,6 +238,7 @@ class TaskRoundTests(PipelineTestCase):
         self.assertEqual(
             [(e.kind, e.status) for e in job.evidence],
             [
+                ("task-round", "planned"),
                 ("provider-result", "succeeded"),
                 ("build-commit", "committed"),
                 ("task-result", "passed"),
@@ -304,6 +306,101 @@ class TaskRoundTests(PipelineTestCase):
         self.assertNotIn("checks", [e.kind for e in job.evidence])
         self.assertEqual(self.starts(reviewer), [])
         self.assertEqual(job.attempts.build, 1)
+
+    def rework_once(self, finding: dict[str, Any]) -> tuple[Any, list[str]]:
+        """Round 1 builds T1, T2; the review asks for ``finding``; round 2 is approved."""
+        job = self.handed_off_job(TASK_PLAN)
+        reviews = [{"review": {**request_changes("x"), "findings": [finding]}},
+                   {"review": APPROVE}]  # fmt: skip
+        factory, builder, _ = self.providers([HELLO, NOTE], reviews)
+        job = self.run_pipeline(job.job_id, factory)
+        self.assertEqual([e.status for e in job.evidence if e.kind == "review"],
+                         ["request-changes", "approve"])  # fmt: skip
+        self.assertEqual((job.attempts.build, job.attempts.rework), (2, 1))
+        return job, [s["prompt"] for s in self.starts(builder)]
+
+    def assert_rebuilt_only(self, finding: dict[str, Any], rebuilt: str) -> None:
+        job, prompts = self.rework_once(finding)
+        self.assertEqual(len(prompts), 3)
+        current = [line for line in prompts[2].splitlines() if line.endswith("[current]")]
+        self.assertEqual(len(current), 1)
+        self.assertTrue(current[0].startswith(f"- {rebuilt}: "))
+        self.assertIn("Reviewer finding: [major]", prompts[2])
+        rounds = [e for e in job.evidence if e.kind == "task-round"]
+        self.assertEqual(self.store.evidence_payload(job, rounds[-1])["tasks"], [rebuilt])
+
+    def test_rework_rebuilds_only_the_task_whose_file_a_finding_names(self) -> None:
+        finding = {"severity": "major", "file": "greet.txt", "issue": "too terse",
+                   "suggestion": "say more"}  # fmt: skip
+        self.assert_rebuilt_only(finding, "T1")
+
+    def test_rework_rebuilds_only_the_task_a_finding_names_by_id(self) -> None:
+        finding = {"severity": "major", "file": "-", "issue": "T2 must mention the greeting",
+                   "suggestion": "add it"}  # fmt: skip
+        self.assert_rebuilt_only(finding, "T2")
+
+    def test_a_finding_that_names_no_task_rebuilds_every_task(self) -> None:
+        finding = {"severity": "major", "file": "README.md", "issue": "unrelated",
+                   "suggestion": "fix"}  # fmt: skip
+        _, prompts = self.rework_once(finding)
+        self.assertEqual(len(prompts), 4)
+
+    def test_a_rework_round_stopped_as_it_starts_still_rebuilds_its_tasks(self) -> None:
+        job = self.handed_off_job(TASK_PLAN)
+        finding = {"severity": "major", "file": "greet.txt", "issue": "too terse",
+                   "suggestion": "say more"}  # fmt: skip
+        reviews = [{"review": {**request_changes("x"), "findings": [finding]}},
+                   {"review": APPROVE}]  # fmt: skip
+        factory, builder, _ = self.providers([HELLO, NOTE, HELLO], reviews)
+        real_start = dispatch.start_build
+        calls: list[int] = []
+
+        def start_then_die(*args: Any, **kwargs: Any) -> None:
+            real_start(*args, **kwargs)
+            calls.append(1)
+            if len(calls) == 2:  # the rework round: BUILDING entered, nothing built yet
+                raise RuntimeError("orchestrator killed")
+
+        with mock.patch("forgeflow.pipeline.start_build", side_effect=start_then_die):
+            with self.assertRaisesRegex(RuntimeError, "killed"):
+                self.run_pipeline(job.job_id, factory)
+        self.assertEqual(self.store.load(job.job_id).state, S.INTERRUPTED)
+        job = self.run_pipeline(job.job_id, factory)
+        prompts = [s["prompt"] for s in self.starts(builder)]
+        self.assertEqual(len(prompts), 3, "the rework's task is built after the resume")
+        self.assertIn("- T1: Write the greeting [current]", prompts[2])
+        self.assertEqual([e.status for e in job.evidence if e.kind == "review"],
+                         ["request-changes", "approve"])  # fmt: skip
+
+    def test_a_human_go_ahead_after_the_task_limit_restarts_at_that_task(self) -> None:
+        job = self.handed_off_job(TASK_PLAN)
+        steps = [HELLO, *[BROKEN_NOTE] * MAX_TASK_ATTEMPTS, {**NOTE, "writes": {
+            "notes.txt": "it says hello\n", "greet.txt": "hello\n"}}]  # fmt: skip
+        factory, builder, _ = self.providers(steps, {"review": APPROVE})
+        job = self.run_pipeline(job.job_id, factory)
+        self.assertEqual(job.state, S.NEEDS_HUMAN)
+        job = self.run_pipeline(job.job_id, factory, reason="the note must keep the greeting")
+        prompts = [s["prompt"] for s in self.starts(builder)]
+        self.assertEqual(len(prompts), 2 + MAX_TASK_ATTEMPTS, "T1 is not built again")
+        self.assertIn("- T1: Write the greeting [done]\n- T2: Add a note [current]", prompts[-1])
+        self.assertIn("the note must keep the greeting", prompts[-1])
+        self.assertEqual([e.status for e in job.evidence if e.kind == "review"], ["approve"])
+
+    def test_an_interrupted_round_whose_tasks_all_passed_builds_nothing(self) -> None:
+        job = self.handed_off_job(TASK_PLAN)
+        factory, _, _ = self.providers([HELLO, NOTE], {"review": APPROVE})
+        job = self.run_pipeline(job.job_id, factory)
+        parts = design.plan_parts(TASK_PLAN)
+        interrupted = replace(job, state=S.INTERRUPTED, interrupted_from=S.BUILDING)
+        self.assertEqual(pipeline.round_tasks(self.store, interrupted, parts), [])
+        ready = replace(job, state=S.READY)  # a human's go-ahead: rework by the findings
+        self.assertEqual(pipeline.round_tasks(self.store, ready, parts), list(parts.tasks))
+        # A round that was planned but never started (BUILDING refused) does not count.
+        self.store.record_evidence(job.job_id, "task-round", "planned",
+                                   {"round": 2, "tasks": ["T1"], "done": ["T2"]},
+                                   mocked=False)  # fmt: skip
+        ready = replace(self.store.load(job.job_id), state=S.READY)
+        self.assertEqual(pipeline.round_tasks(self.store, ready, parts), list(parts.tasks))
 
     def test_a_plan_without_tasks_is_built_in_one_run_with_a_warning(self) -> None:
         job = self.handed_off_job()

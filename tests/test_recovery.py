@@ -23,7 +23,7 @@ from typing import Any
 from forgeflow.errors import DuplicateWorkerError
 from forgeflow.jobs import JobState
 from forgeflow.proc import pid_alive
-from tests.pipeline_support import APPROVE, PipelineTestCase
+from tests.pipeline_support import APPROVE, TASK_PLAN, PipelineTestCase
 from tests.support import PROJECT_ROOT, run_git
 
 S = JobState
@@ -116,6 +116,54 @@ class RecoveryTests(PipelineTestCase):
         self.assertEqual([(c.status, c.build_round) for c in checks], [("passed", 2)])
         events = [e["event"] for e in self.store.events(job.job_id)]
         self.assertIn("recovered", events)
+        self.assertEqual(job.state, S.NEEDS_HUMAN)  # simulated providers are never delivered
+
+    def test_a_kill_during_a_task_costs_only_that_task(self) -> None:
+        job = self.handed_off_job(TASK_PLAN)
+        hello = {"writes": {"greet.txt": "hello\n"}}
+        partial = {"writes": {"draft.txt": "half a note\n"}, "sleep": 120}
+        note = {"writes": {"notes.txt": "it says hello\n"}}
+        factory, builder, reviewer = self.providers([hello, partial, note], {"review": APPROVE})
+        child = self.spawn(job.job_id, builder, reviewer)
+
+        def second_task_running() -> bool:
+            lease = self.store.load(job.job_id).lease
+            starts = [r for r in self.fake_cli_log(builder) if r["event"] == "start"]
+            return bool(lease and lease.worker_pid and len(starts) == 2)
+
+        self.assertTrue(_wait(second_task_running), "T2 never started")
+        provider_pid = int(self.fake_cli_log(builder)[-1]["pid"])
+        worktree = self.worktree(self.store.load(job.job_id))
+        t1_commit = run_git(worktree, "rev-parse", "HEAD")
+        self.kill_orchestrator(child, provider_pid, job.job_id)
+        self.assertEqual((worktree / "draft.txt").read_text("utf-8"), "half a note\n")
+
+        job = self.run_pipeline(job.job_id, factory)  # recovers, then resumes at T2
+        starts = [r for r in self.fake_cli_log(builder) if r["event"] == "start"]
+        self.assertEqual(len(starts), 3, "T1 is not built again")
+        resumed = starts[2]["prompt"]
+        self.assertIn("- T1: Write the greeting [done]\n- T2: Add a note [current]", resumed)
+        self.assertIn("Your previous run of T2 was interrupted. Its partial, uncommitted", resumed)
+        self.assertNotIn("finish the job", resumed)
+        self.assertIn("resuming at T2 with its partial work", " ".join(self.lines))
+        # T1's commit is kept as it was; T2's commit (round 2) holds the partial file too.
+        ref = job.ref or job.job_id
+        self.assertEqual(run_git(worktree, "rev-parse", "HEAD~1"), t1_commit)
+        self.assertEqual(
+            run_git(worktree, "log", "-1", "--format=%s"), f"forgeflow: {ref} T2 round 2"
+        )
+        committed = run_git(worktree, "show", "--name-only", "--format=", "HEAD").split()
+        self.assertEqual(sorted(committed), ["draft.txt", "notes.txt"])
+        results = [e for e in job.evidence if e.kind == "task-result"]
+        self.assertEqual(
+            [
+                (self.store.evidence_payload(job, e)["task"], e.build_round, e.status)
+                for e in results
+            ],
+            [("T1", 1, "passed"), ("T2", 2, "passed")],
+        )
+        self.assertEqual((job.attempts.build, job.attempts.resumes), (2, 1))
+        self.assertEqual([e.status for e in job.evidence if e.kind == "review"], ["approve"])
         self.assertEqual(job.state, S.NEEDS_HUMAN)  # simulated providers are never delivered
 
     def test_a_killed_review_resumes_in_review_without_rebuilding(self) -> None:
