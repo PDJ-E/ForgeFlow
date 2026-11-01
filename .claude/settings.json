@@ -1,0 +1,57 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(py -3.13 -m unittest *)",
+      "Bash(py -3.13 -m ruff *)",
+      "Bash(py -3.13 -m mypy)",
+      "Bash(py -3.13 -m mypy *)",
+      "Bash(python3.13 -m unittest *)",
+      "Bash(python3.13 -m ruff *)",
+      "Bash(python3.13 -m mypy)",
+      "Bash(python3.13 -m mypy *)",
+      "Bash(py -3.13 -m forgeflow status *)",
+      "Bash(py -3.13 -m forgeflow doctor)",
+      "Bash(git status *)",
+      "Bash(git diff *)",
+      "Bash(git log *)",
+      "Bash(git show *)",
+      "Bash(git switch -c *)"
+    ],
+    "deny": [
+      "Edit(/.forge/runtime/**)",
+      "Edit(/.forge/worktrees/**)",
+      "Edit(/.claude/settings.json)",
+      "Edit(/.claude/hooks/**)",
+      "Edit(/LICENSE)",
+      "Bash(git push --force *)",
+      "Bash(git push -f *)",
+      "Bash(git push --force-with-lease *)",
+      "Bash(git reset --hard *)",
+      "Bash(git clean *)",
+      "Bash(git checkout *)",
+      "Bash(git restore *)",
+      "Bash(git worktree remove *)",
+      "Bash(git branch -D *)",
+      "Bash(gh pr merge *)",
+      "Bash(* forgeflow approve *)",
+      "Bash(* -m forgeflow approve *)",
+      "Bash(forgeflow approve *)",
+      "Bash(py -3.13 -m forgeflow approve *)",
+      "Bash(python -m forgeflow approve *)",
+      "Bash(python3.13 -m forgeflow approve *)"
+    ]
+  },
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/stop-checks.sh\"",
+            "timeout": 300
+          }
+        ]
+      }
+    ]
+  }
+}
