@@ -110,6 +110,7 @@ class DetectionTests(unittest.TestCase):
         self.assertEqual(caps.version, "2.1.310 (Claude Code)")
         self.assertTrue(caps.features["--print"])
         self.assertFalse(caps.features["--json-schema"])
+        self.assertEqual(ClaudeCodeProvider().features, {}, "nothing is assumed before detect")
 
     def test_codex_not_logged_in(self) -> None:
         runner = ScriptedRunner(
@@ -394,6 +395,43 @@ class ExecutionTests(unittest.TestCase):
         self.assertEqual(argv[argv.index("--tools") + 1], "Read,Glob,Grep")
         self.assertIn("--json-schema", argv)
 
+    def test_budget_flags_are_passed_only_when_detected(self) -> None:
+        task = self.task(max_turns=40, max_budget_usd=2.5)
+        provider = ClaudeCodeProvider()
+        self.assertNotIn("--max-turns", provider.argv(task))
+        self.assertNotIn("--max-budget-usd", provider.argv(task))
+        provider.features = {"--max-turns": True, "--max-budget-usd": True}
+        argv = provider.argv(task)
+        self.assertEqual(argv[argv.index("--max-turns") + 1], "40")
+        self.assertEqual(argv[argv.index("--max-budget-usd") + 1], "2.5")
+        self.assertNotIn("--max-turns", provider.argv(self.task()), "no limit, no flag")
+        with self.assertRaises(ValidationError):
+            self.task(max_turns=0).validate()
+        with self.assertRaises(ValidationError):
+            self.task(max_budget_usd=-1.0).validate()
+
+    def test_detection_enables_the_budget_flags(self) -> None:
+        provider = ClaudeCodeProvider()
+        runner = ScriptedRunner({("--help",): (0, "  --max-budget-usd <amount>\n")})
+        with mock.patch("forgeflow.providers.which", return_value="claude"):
+            provider.detect(runner)
+        self.assertEqual(
+            (provider.features["--max-budget-usd"], provider.features["--max-turns"]),
+            (True, False),
+        )
+
+    def test_a_run_stopped_by_a_limit_is_budget_exhausted(self) -> None:
+        for limit in ("max_turns", "max_budget_usd"):
+            with self.subTest(limit):
+                command = self.cli(
+                    "claude", {"writes": {"src/a.py": "x\n"}, "limit": limit, "exit": 1}
+                )
+                result = self.execute(ClaudeCodeProvider(command=command), self.task())
+                self.assertEqual(result.status, "budget_exhausted")
+                self.assertEqual(result.telemetry["limit_hit"], limit)
+                self.assertIn(f"Reached maximum {limit}", result.summary)
+                self.assertEqual(result.usage.tokens, "measured")
+
     def test_claude_errors_are_failures(self) -> None:
         for step in ({"is_error": True, "result": "Credit balance too low"}, {"exit": 1}):
             with self.subTest(step):
@@ -531,6 +569,22 @@ class StreamEvidenceTests(GitRepoTestCase):
         self.assertEqual({p.parent for p in paths}, {evidence})
         self.assertEqual(len(set(paths)), 3, "every invocation gets its own stream file")
         self.assertTrue(paths[1].name.startswith("stream-reviewer-"))
+
+    def test_budgets_travel_with_the_task(self) -> None:
+        job = self.ready_job()
+        task = build_task(
+            self.store,
+            job.job_id,
+            role="builder",
+            acceptance_criteria=("ok",),
+            allowed_paths=("*",),
+            timeout_seconds=600,
+            max_turns=40,
+            max_budget_usd=2.5,
+        )
+        self.assertEqual(
+            (task.timeout_seconds, task.max_turns, task.max_budget_usd), (600, 40, 2.5)
+        )
 
 
 class PreflightTests(unittest.TestCase):

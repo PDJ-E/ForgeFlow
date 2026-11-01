@@ -116,6 +116,8 @@ class ProviderTask:
     review_token_file: str = ""
     model: str | None = None  # passed through to the CLI only when set
     stream_path: str = ""  # Claude: where the event stream is recorded as it arrives
+    max_turns: int | None = None  # per invocation; passed only to a CLI that supports it
+    max_budget_usd: float | None = None
 
     def validate(self) -> None:
         if self.role not in ROLES:
@@ -135,6 +137,10 @@ class ProviderTask:
             raise ValidationError("a builder task must declare its allowed paths")
         if self.timeout_seconds <= 0 or self.max_attempts <= 0:
             raise ValidationError("timeout and attempts must be positive")
+        if (self.max_turns is not None and self.max_turns <= 0) or (
+            self.max_budget_usd is not None and self.max_budget_usd <= 0
+        ):
+            raise ValidationError("turn and budget limits must be positive")
         if hashlib.sha256(self.plan_text.encode("utf-8")).hexdigest() != self.plan_sha256:
             raise ValidationError("the task's plan text is not the approved plan")
 
@@ -197,7 +203,7 @@ class UsageReport:
 class ProviderResult:
     provider: str
     role: str
-    status: str  # "succeeded" | "failed" | "timed_out" | "blocked"
+    status: str  # "succeeded" | "failed" | "timed_out" | "budget_exhausted" | "blocked"
     summary: str
     changed_files: tuple[str, ...]
     usage: UsageReport
@@ -329,6 +335,7 @@ class _CliProvider(Provider):
         self.command = tuple(command) if command else None
         self.runner = runner
         self.real = command is None
+        self.features: dict[str, bool] = {}  # options found by the last detect(); none assumed
 
     def _argv0(self) -> list[str]:
         return list(self.command) if self.command else [self.executable_name]
@@ -436,6 +443,7 @@ class ClaudeCodeProvider(_CliProvider):
         "--permission-prompts",
         "--no-session-persistence",
         "--verbose",
+        "--max-turns",
     )
     _common_flags = (
         "--print",
@@ -463,6 +471,7 @@ class ClaudeCodeProvider(_CliProvider):
         help_result = _safe(runner, [self.executable_name, "--help"])
         if help_result and help_result.ok:
             caps.features = _flags_in(help_result.stdout, self.feature_flags)
+        self.features = caps.features
         auth = _safe(runner, [self.executable_name, "auth", "status"])
         if auth is None or auth.timed_out:
             caps.auth_detail = "`claude auth status` did not complete"
@@ -501,6 +510,10 @@ class ClaudeCodeProvider(_CliProvider):
             ]
         if task.model:
             argv += ["--model", task.model]
+        if task.max_turns and self.features.get("--max-turns"):
+            argv += ["--max-turns", str(task.max_turns)]
+        if task.max_budget_usd and self.features.get("--max-budget-usd"):
+            argv += ["--max-budget-usd", f"{task.max_budget_usd:g}"]
         return argv
 
     def execute(self, task: ProviderTask, lease: LeaseHandle) -> ProviderResult:
@@ -540,6 +553,18 @@ class ClaudeCodeProvider(_CliProvider):
             if isinstance(d, dict)
         )
         summary = str(data.get("result") or data.get("subtype") or "").strip()
+        limit = _CLAUDE_LIMITS.get(str(data.get("subtype")))
+        if limit is not None or data.get("terminal_reason") == "budget_exhausted":
+            errors = "; ".join(str(e) for e in data.get("errors") or []) or summary
+            return self._result(
+                task,
+                result,
+                status="budget_exhausted",
+                summary=f"stopped by a limit: {errors}",
+                usage=usage,
+                notes=notes,
+                telemetry={**telemetry, "limit_hit": limit or "budget"},
+            )
         failed = bool(data.get("is_error")) or data.get("subtype") != "success" or not result.ok
         if failed:
             return self._result(
@@ -615,6 +640,8 @@ class _StreamLog:
         self._close()
 
 
+# Result subtypes for a run stopped by --max-turns / --max-budget-usd (observed: 2.1.316).
+_CLAUDE_LIMITS = {"error_max_turns": "max_turns", "error_max_budget_usd": "max_budget_usd"}
 _CLAUDE_INPUT_KEYS = ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens")
 
 
@@ -1023,6 +1050,8 @@ def build_task(
     protected_paths: tuple[str, ...] = (),
     feedback: tuple[str, ...] = (),
     model: str | None = None,
+    max_turns: int | None = None,
+    max_budget_usd: float | None = None,
 ) -> ProviderTask:
     """Derive a task from the job record so the approved plan and worktree cannot drift."""
     job = store.load(job_id)
@@ -1051,6 +1080,8 @@ def build_task(
         protected_paths=protected_paths,
         feedback=feedback,
         model=model,
+        max_turns=max_turns,
+        max_budget_usd=max_budget_usd,
         stream_path=str(
             store.job_dir(job_id)
             / "evidence"

@@ -85,7 +85,11 @@ class StdoutLineTests(unittest.TestCase):
         for script, timeout in (("print('x')", 30.0), ("import time; time.sleep(60)", 2.0)):
             with self.subTest(script), warnings.catch_warnings(record=True) as caught:
                 warnings.simplefilter("always", ResourceWarning)
-                run_tracked([sys.executable, "-c", script], timeout=timeout, on_stdout_line=print)
+                run_tracked(
+                    [sys.executable, "-c", script],
+                    timeout=timeout,
+                    on_stdout_line=lambda _line: None,
+                )
                 gc.collect()
             self.assertEqual([str(w.message) for w in caught if w.category is ResourceWarning], [])
 

@@ -16,6 +16,7 @@ consumed when used, and the last one repeats. A step may contain:
 * ``result``: the builder's final message; ``review``: the reviewer's structured answer;
 * ``sleep``: seconds to wait after writing, before answering (interruption tests);
 * ``exit``, ``stderr``, ``is_error``: failure modes; ``sandbox_refusal``: Codex's message;
+* ``limit``: Claude stopped by ``max_turns`` or ``max_budget_usd`` (use with ``exit: 1``);
 * ``cannot_read``: a reviewer that answers but never read the snapshot (no token returned).
 
 A reviewer step's answer gets ``snapshot_token`` (read from the snapshot's token file, as a
@@ -158,6 +159,14 @@ def main() -> int:
             "usage": USAGE,
             "permission_denials": step.get("denials", []),
         }
+        if step.get("limit"):  # as Claude Code 2.1.316 reports either limit being reached
+            output.update(
+                subtype=f"error_{step['limit']}",
+                is_error=True,
+                terminal_reason="max_turns" if step["limit"] == "max_turns" else "budget_exhausted",
+                errors=[f"Reached maximum {step['limit']}"],
+                result=None,
+            )
         if "--json-schema" in args:
             output["structured_output"] = review
         _emit(output)
