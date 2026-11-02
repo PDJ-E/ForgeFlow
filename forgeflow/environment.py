@@ -16,12 +16,17 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
-from forgeflow import MIN_PYTHON, hostskills
+from forgeflow import MIN_PYTHON, hostskills, repoconfig
 from forgeflow.errors import ForgeFlowError, ToolNotFoundError
-from forgeflow.gitrepo import discover_identity, git, porcelain_status
+from forgeflow.gitrepo import discover_identity, git, git_ok, porcelain_status
 from forgeflow.hostskills import KNOWLEDGE_WORK_PLUGINS
 from forgeflow.proc import CommandResult, Runner, run_command, which
-from forgeflow.providers import REAL_PROVIDERS, CodexProvider, ProviderCapabilities
+from forgeflow.providers import (
+    REAL_PROVIDERS,
+    CodexProvider,
+    ProviderCapabilities,
+    builder_commands,
+)
 from forgeflow.store import RUNTIME_RELATIVE, JobStore
 
 MIN_GIT = (2, 31)  # `git rev-parse --path-format=absolute`
@@ -306,6 +311,30 @@ def check_providers(runner: Runner, workdir: Path | None = None) -> list[Check]:
     return checks
 
 
+def check_builder_shell(root: Path, runner: Runner) -> Check:
+    """What a Claude builder's Bash may run in this repository (ADR 0006 §3), and what that
+    does not bound. Read from the checks configured at this checkout's HEAD."""
+    try:
+        head = git_ok(root, "rev-parse", "HEAD", runner=runner, read_only=True)
+        config = repoconfig.load(root, head, runner=runner)
+    except ForgeFlowError as exc:
+        return Check(
+            "builder-shell",
+            INFO,
+            False,
+            f"no usable checks configured, so no builder shell ({exc})",
+        )
+    commands = list(builder_commands(config.argv_list))
+    summary = (
+        f"a Claude builder's Bash may run exactly: {'; '.join(commands)} (Claude Code also "
+        "lets its own read-only commands through, e.g. ls, git log). Running the test command "
+        "executes arbitrary, builder-written code as you, so this list bounds intent, not "
+        "capability: the boundary is ForgeFlow's scope and protected-path check, its own commit "
+        "and checks, and the review"
+    )
+    return Check("builder-shell", INFO, False, summary, {"commands": commands, **config.source})
+
+
 def check_plugins(runner: Runner) -> Check:
     found = hostskills.claude_code_skills(runner)
     if found.status == "unavailable":
@@ -362,6 +391,8 @@ def inspect_environment(
         checks.append(check_runtime(root))
     checks.extend(check_github(runner, repo_check.data.get("slug"), network))
     checks.extend(check_providers(runner, root or start))
+    if root is not None:
+        checks.append(check_builder_shell(root, runner))
     checks.append(check_plugins(runner))
     if root is not None:
         checks.append(check_skill_adapters(root))

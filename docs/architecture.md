@@ -1,7 +1,7 @@
 # ForgeFlow — architecture and design boundaries
 
-**Status:** design direction. Checkpoints A to C implement the runtime, the planning workflow and the build-review-PR path ([ADR 0003](decisions/0003-runtime-state-and-worktrees.md), [ADR 0004](decisions/0004-planning-workflow-and-gate-a.md), [ADR 0005](decisions/0005-build-review-and-delivery.md)); the knowledge and learning parts below are still proposals.  
-**Last reviewed:** 2026-10-26.
+**Status:** design direction. Checkpoints A to C implement the runtime, the planning workflow and the build-review-PR path ([ADR 0003](decisions/0003-runtime-state-and-worktrees.md), [ADR 0004](decisions/0004-planning-workflow-and-gate-a.md), [ADR 0005](decisions/0005-build-review-and-delivery.md), with task-scoped rounds from [ADR 0006](decisions/0006-task-scoped-execution-harness.md)); the knowledge and learning parts below are still proposals.  
+**Last reviewed:** 2026-11-01.
 
 ForgeFlow is a human-governed, multi-model software engineering workflow. It should connect idea exploration, product definition, architecture decisions, verified implementation, independent review, and learning while minimizing unnecessary agents and operational complexity.
 
@@ -32,6 +32,7 @@ HUMAN PLAN APPROVAL
 GitHub Issue + Project Ready card
      |
 BUILD (one writable owner: Claude or Codex; isolated worktree)
+     |   task by task: builder run, scope check, ForgeFlow commit, checks (ADR 0006)
      |
 DETERMINISTIC CHECKS (configured for the target repo)
      |

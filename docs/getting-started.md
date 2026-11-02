@@ -153,7 +153,7 @@ argv = ["{python}", "-m", "ruff", "check", "."]
 
 [build]
 allowed_paths = ["*"]                                  # what the builder may change
-protected_paths = [".forge/*", ".github/workflows/*"]  # the default; changes here go to you
+protected_paths = [".forge/*", ".github/workflows/*", ".claude/*", ".agents/*", "CLAUDE.md", "AGENTS.md"]  # the default; changes here go to you
 max_turns = 100              # per provider invocation (default 100, at most 500)
 max_budget_usd = 5.0         # per invocation, API-equivalent (default 5.0, at most 100)
 task_timeout_seconds = 1800  # per invocation (default 1800, at most 14400); run/resume --timeout override it
@@ -172,9 +172,9 @@ py -3.13 -m forgeflow run J3 --builder claude --reviewer codex   # or the revers
 You must name both. `run` first checks both providers (installed, logged in, the CLI options it relies on, a sandbox that works here) and stops before anything happens if one cannot run. Then it:
 
 1. creates the worktree `.forge/worktrees/<job-id>` on branch `forge/<job-id>` from `origin/<base>` and moves the issue's card to **Building**;
-2. runs the builder there with the approved plan (Claude: file tools only, confined to the worktree, no commands, no MCP; Codex: its `workspace-write` sandbox);
-3. asks git what changed, refuses anything outside `allowed_paths` or inside `protected_paths` (left uncommitted for you), and commits the rest itself;
-4. runs your checks on that commit (**QA**); a failure goes back to the builder with the failing output;
+2. builds the plan **task by task** ([ADR 0006](decisions/0006-task-scoped-execution-harness.md)): each `### T<n>` task is its own builder run that sees the plan's objective, requirements and scope, that task in full and the other tasks' titles (Claude: file tools confined to the worktree, a shell that runs only your configured checks plus `git status`/`git diff`, no MCP; Codex: its `workspace-write` sandbox). A plan without `### T<n>` tasks is built in one run, as before;
+3. after each task asks git what changed, refuses anything outside `allowed_paths` or inside `protected_paths` (left uncommitted for you), commits the rest itself (`forgeflow: J3 T2 round 1`) and runs your checks on that commit; a task whose checks fail is retried with the failing output, up to 3 runs, then stops and asks you, with the earlier tasks' commits kept;
+4. after the last task runs your checks on the final commit (**QA**); a failure goes back to the builder with the failing output;
 5. gives the reviewer a read-only snapshot of exactly that commit (**Review**); the reviewer must return a random token from a file in the snapshot, so a review that could not read the files is blocked, not approved; blocking or major findings go back to the builder, minor ones go into the PR;
 6. after at most **2** rework rounds without success, stops and asks you (**Blocked**);
 7. otherwise pushes `forge/<job-id>` (never forced, never to the base branch), opens one **draft** PR with the scope, changes, check results, review and limitations, checks that GitHub shows the validated commit as its head, and stops at **Gate B**.
@@ -187,12 +187,13 @@ The output ends with the PR link (exit code 0) or the reason it needs you (exit 
 - Then `py -3.13 -m forgeflow sync J3`: ForgeFlow asks GitHub, records the merge only if the PR was merged with the validated commit, and moves the card to **Done**.
 - Want changes on the draft PR? `py -3.13 -m forgeflow rework J3 --reason "rename the option"` runs another bounded round and updates the same PR.
 - A job that stopped for you continues only with a reason: `py -3.13 -m forgeflow run J3 --reason "..."`, optionally with another `--builder` or `--reviewer`. That gives it a fresh two-round budget.
-- Interrupted (Ctrl+C, a crash, a reboot)? `py -3.13 -m forgeflow resume J3` recovers the job if no worker still owns it and continues in the phase it was in, keeping any uncommitted work. It never starts a second provider, rebuilds an approved commit or opens a second PR.
+- Interrupted (Ctrl+C, a crash, a reboot)? `py -3.13 -m forgeflow resume J3` recovers the job if no worker still owns it and continues in the phase it was in, keeping any uncommitted work. A build continues at the first task without passing checks, and that task is told about its partial work; finished tasks are not rebuilt. It never starts a second provider, rebuilds an approved commit or opens a second PR.
+- Rework (review findings, or your `rework --reason` note) rebuilds only the tasks they name (by `T<n>` or by a file on the task's `Files:` line), or every task when one names none or the final checks failed. Continuing an escalated job with `run --reason` builds only the tasks without passing checks.
 - `sync` also realigns the Project Status with the job at any time; it is idempotent.
 
 ### Provider notes
 
-- **Claude Code** builds with `--restricted`: your user and project settings, hooks and MCP servers are not loaded, and it has no command tool, so it learns about failing checks from the next round's prompt.
+- **Claude Code** builds with `--restricted`: your user and project settings, hooks and MCP servers are not loaded. Its shell runs exactly your configured checks plus `git status` and `git diff` (`--permission-mode dontAsk`; Claude Code also allows its own read-only commands such as `ls`); everything else, including writes, redirections, network and git changes, is refused. `doctor` lists the commands. Running your test command runs code the builder wrote, so this list bounds intent, not capability: what protects you is ForgeFlow's scope check, its own commit and checks, the review and Gate B ([ADR 0005](decisions/0005-build-review-and-delivery.md), [ADR 0006](decisions/0006-task-scoped-execution-harness.md) §3).
 - **Codex** uses an independent, minimal application-data profile with separate authentication. Detection, preflight and execution verify empty effective MCP/plugin inventories. Complete the [isolated Codex setup](codex-runtime.md) before using it as builder or reviewer. Your normal interactive Codex profile is unchanged.
 - **Codex on Windows** (unelevated sandbox) refuses every write in a repository under `%TEMP%`; `run` refuses that location up front.
 - Token counts are shown when the CLI reports them; Claude's cost is an API-equivalent estimate, not a charge.

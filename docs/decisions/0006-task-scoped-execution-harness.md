@@ -54,11 +54,19 @@ ForgeFlow, not a model, orchestrates. It is a deterministic workflow over the pl
    unfinished task. The full checks and the model review still run once on the final commit;
    Gate A/B, clearance, scope and protected paths are unchanged.
 3. **In-loop verification for the builder.** The Claude builder gets `Bash`, restricted with
-   `--allowedTools` to the exact argv of the configured checks (plus read-only git), and
-   `--permission-mode dontAsk` refuses everything else. Rationale: ForgeFlow already executes
-   builder-written code when it runs the checks, so letting the builder run the same commands
-   earlier adds feedback, not a new capability. Network, git writes and arbitrary commands
-   stay refused. Codex keeps its own sandbox and remains outside the critical path.
+   `--allowedTools` to the exact argv of the configured checks (POSIX-quoted) plus `git status`
+   and `git diff`, and `--permission-mode dontAsk` refuses everything else. Claude Code also
+   auto-allows its own read-only commands (`ls`, `git log`, `git diff <args>`, …); the rules
+   cannot turn that off. Live-probed (ADR 0005): writes, redirections, pipes into writers,
+   network commands and git state changes are all refused.
+   **This allowlist bounds intent, not capability.** Once the builder can run the test command
+   it can execute arbitrary code as the user: it writes the tests and the code they import. The
+   read-only commands add nothing beyond that. ForgeFlow already executes builder-written code
+   when it runs the checks, so the shell adds feedback, not a new capability. The boundary is
+   unchanged and lies elsewhere: ForgeFlow's scope and protected-path check of the diff, its own
+   commit, its own check run on that commit, the independent review, and the human gates.
+   `doctor` states the same next to the allowed commands. Codex keeps its own sandbox and
+   remains outside the critical path.
 4. **Budgets and telemetry.** Every invocation gets `--max-turns` and, where supported,
    `--max-budget-usd`, configured in `.forge/forgeflow.toml` `[build]` with a per-task timeout.
    Output switches to `--output-format stream-json --verbose`; ForgeFlow writes the event

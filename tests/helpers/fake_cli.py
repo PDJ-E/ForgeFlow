@@ -116,6 +116,9 @@ def main() -> int:
         "argv": args,
         "prompt": prompt,
         "codex_home": os.environ.get("CODEX_HOME"),
+        "bash_timeouts": [
+            os.environ.get(v) for v in ("BASH_DEFAULT_TIMEOUT_MS", "BASH_MAX_TIMEOUT_MS")
+        ],
     }
     _log(script, {**record, "event": "start"})
     writes = dict(step.get("writes", {}))  # type: ignore[call-overload]

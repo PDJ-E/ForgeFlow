@@ -4,11 +4,13 @@ Detection (executables, versions, auth status and CLI options parsed from ``--he
 execution are real. The invocations below were verified against the installed CLIs (Claude
 Code 2.1.311, Codex CLI 0.164.0, Windows 11) before they were written; see ADR 0005.
 
-* **Claude Code builder:** ``claude -p --restricted --tools Read,Edit,Write,Glob,Grep
-  --permission-mode acceptEdits --permission-prompts none --strict-mcp-config``. It has no
-  command-running tool at all, its file tools are confined to the worktree (a write outside is
-  denied and reported in ``permission_denials``), and user/project settings, hooks, MCP
-  servers, ``CLAUDE.md`` and project agents/skills are not loaded (re-probed on 2.1.316).
+* **Claude Code builder:** ``claude -p --restricted --tools Read,Edit,Write,Glob,Grep,Bash
+  --permission-mode dontAsk --allowedTools <file tools> Bash(<check>)... --permission-prompts
+  none --strict-mcp-config``. Its Bash runs only the exact configured checks, ``git status``
+  and ``git diff`` (plus Claude Code's own read-only commands); everything else is refused
+  (see ``builder_commands`` and ADR 0005). Its file tools are confined to the worktree (a write
+  outside is denied and reported in ``permission_denials``), and user/project settings, hooks,
+  MCP servers, ``CLAUDE.md`` and project agents/skills are not loaded (re-probed on 2.1.316).
 * **Claude Code reviewer:** the same with ``--tools Read,Glob,Grep --permission-mode dontAsk``
   and ``--json-schema`` (the answer arrives in ``structured_output``).
 * **Codex builder:** ``codex exec -s workspace-write -C <worktree>``; **reviewer:** ``-s
@@ -33,6 +35,7 @@ import json
 import os
 import re
 import secrets
+import shlex
 import sys
 import tempfile
 import time
@@ -42,7 +45,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any, TextIO
 
-from forgeflow import fsutil, prompts
+from forgeflow import design, fsutil, prompts
 from forgeflow.codex_runtime import (
     ISOLATION_ARGS,
     CodexAuthenticationError,
@@ -120,6 +123,11 @@ class ProviderTask:
     stream_path: str = ""  # Claude: where the event stream is recorded as it arrives
     max_turns: int | None = None  # per invocation; passed only to a CLI that supports it
     max_budget_usd: float | None = None
+    # builder: the plan task this run implements ("" = the whole plan) and those already done
+    task_id: str = ""
+    done_tasks: tuple[str, ...] = ()
+    # builder: the configured per-check timeout, also given to Claude's Bash tool (ADR 0006 §3)
+    check_timeout_seconds: int | None = None
 
     def validate(self) -> None:
         if self.role not in ROLES:
@@ -145,6 +153,8 @@ class ProviderTask:
             raise ValidationError("turn and budget limits must be positive")
         if hashlib.sha256(self.plan_text.encode("utf-8")).hexdigest() != self.plan_sha256:
             raise ValidationError("the task's plan text is not the approved plan")
+        if self.task_id:
+            design.plan_parts(self.plan_text).task(self.task_id)
 
     def permits_path(self, rel_path: str) -> bool:
         """True if ``rel_path`` is a plain repository-relative path inside an allowed pattern.
@@ -431,6 +441,28 @@ class _CliProvider(Provider):
         )
 
 
+_FILE_TOOLS = ("Read", "Edit", "Write", "Glob", "Grep")  # confined to the worktree by --restricted
+BUILDER_GIT_COMMANDS = ("git status", "git diff")
+
+
+def builder_commands(checks: Sequence[Sequence[str]]) -> tuple[str, ...]:
+    """The exact shell commands a Claude builder may run (ADR 0006 §3): each configured check
+    as one POSIX-quoted line (Claude Code's Bash tool is a POSIX shell, Git Bash on Windows),
+    plus ``git status`` and ``git diff`` without arguments. Claude Code itself also lets its own
+    read-only commands through (ls, git log, ...); see ADR 0005."""
+    return (*(shlex.join(argv) for argv in checks), *BUILDER_GIT_COMMANDS)
+
+
+def builder_env(task: ProviderTask) -> dict[str, str]:
+    """Claude's Bash tool stops a command after 2 minutes by default; a builder's checks get the
+    time ForgeFlow gives them (``BASH_DEFAULT_TIMEOUT_MS``/``BASH_MAX_TIMEOUT_MS``, Claude Code's
+    environment-variable reference)."""
+    if task.role != "builder" or not task.check_timeout_seconds:
+        return {}
+    ms = str(task.check_timeout_seconds * 1000)
+    return {"BASH_DEFAULT_TIMEOUT_MS": ms, "BASH_MAX_TIMEOUT_MS": ms}
+
+
 class ClaudeCodeProvider(_CliProvider):
     name = "claude"
     executable_name = "claude"
@@ -464,8 +496,11 @@ class ClaudeCodeProvider(_CliProvider):
         "--permission-prompts",
         "--no-session-persistence",
     )
-    role_flags = {"builder": _common_flags, "reviewer": (*_common_flags, "--json-schema")}
-    builder_tools = "Read,Edit,Write,Glob,Grep"
+    role_flags = {
+        "builder": (*_common_flags, "--allowedTools"),
+        "reviewer": (*_common_flags, "--json-schema"),
+    }
+    builder_tools = "Read,Edit,Write,Glob,Grep,Bash"
     reviewer_tools = "Read,Glob,Grep"
 
     def detect(self, runner: Runner = run_command) -> ProviderCapabilities:
@@ -508,7 +543,17 @@ class ClaudeCodeProvider(_CliProvider):
             "none",
         ]
         if task.role == "builder":
-            argv += ["--tools", self.builder_tools, "--permission-mode", "acceptEdits"]
+            # dontAsk refuses every tool use no rule allows (ADR 0006 §3): Bash runs only the
+            # exact configured checks plus read-only git; acceptEdits would also let it write.
+            argv += [
+                "--tools",
+                self.builder_tools,
+                "--permission-mode",
+                "dontAsk",
+                "--allowedTools",
+                *_FILE_TOOLS,
+                *(f"Bash({command})" for command in builder_commands(task.validation_commands)),
+            ]
         else:
             argv += [
                 "--tools",
@@ -533,7 +578,14 @@ class ClaudeCodeProvider(_CliProvider):
             else prompts.reviewer_prompt(task)
         )
         with _StreamLog(task.stream_path) as stream:
-            result = self._run(task, lease, self.argv(task), prompt, on_stdout_line=stream.write)
+            result = self._run(
+                task,
+                lease,
+                self.argv(task),
+                prompt,
+                env=builder_env(task) or None,
+                on_stdout_line=stream.write,
+            )
         events = _jsonl(result.stdout)
         telemetry = _claude_telemetry(events, task.stream_path)
         if result.timed_out:
@@ -1062,6 +1114,9 @@ def build_task(
     model: str | None = None,
     max_turns: int | None = None,
     max_budget_usd: float | None = None,
+    task_id: str = "",
+    done_tasks: tuple[str, ...] = (),
+    check_timeout_seconds: int | None = None,
 ) -> ProviderTask:
     """Derive a task from the job record so the approved plan and worktree cannot drift."""
     job = store.load(job_id)
@@ -1092,6 +1147,9 @@ def build_task(
         model=model,
         max_turns=max_turns,
         max_budget_usd=max_budget_usd,
+        task_id=task_id,
+        done_tasks=done_tasks,
+        check_timeout_seconds=check_timeout_seconds,
         stream_path=str(
             store.job_dir(job_id)
             / "evidence"

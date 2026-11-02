@@ -37,13 +37,15 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
-from forgeflow import repoconfig
+from forgeflow import design, repoconfig
 from forgeflow.board import BoardListener
 from forgeflow.dispatch import (
+    build_step,
     latest,
     passing_checks_for_round,
     run_builder,
     run_reviewer,
+    start_build,
     verified_approval,
 )
 from forgeflow.errors import (
@@ -56,9 +58,9 @@ from forgeflow.errors import (
     ValidationError,
 )
 from forgeflow.github import GitHubClient
-from forgeflow.gitrepo import default_base_ref, resolve_commit
-from forgeflow.jobs import UNASSIGNED_PROVIDER, Job, JobState
-from forgeflow.providers import REAL_PROVIDERS, Provider, build_task
+from forgeflow.gitrepo import default_base_ref, porcelain_status, resolve_commit
+from forgeflow.jobs import UNASSIGNED_PROVIDER, Evidence, Job, JobState
+from forgeflow.providers import REAL_PROVIDERS, Provider, ProviderResult, ProviderTask, build_task
 from forgeflow.store import JobStore, LeaseHandle
 from forgeflow.worktree import WORKTREES_RELATIVE, WorktreeManager, prepare_job_worktree
 
@@ -67,6 +69,13 @@ ProviderFactory = Callable[[str], Provider]
 Reporter = Callable[[str], None]
 _CRITERION = re.compile(r"^\s*[-*] \[[ xX]\] (.+?)\s*$", re.MULTILINE)
 _FEEDBACK_TAIL = 1500  # characters of a failed check's output passed back to the builder
+MAX_TASK_ATTEMPTS = 3  # builder runs per plan task and round while its checks fail
+INTERRUPTED_NOTE = (
+    "Your previous run was interrupted. Its partial, uncommitted work is still in the worktree: "
+    "review it and finish the job."
+)
+# A reviewer finding as providers.interpret_review writes it: "[major] path/to/file: issue"
+_FINDING_FILE = re.compile(r"^\[[^\]]*\] (.+?): ")
 
 
 def real_provider(name: str) -> Provider:
@@ -322,6 +331,14 @@ def _can_rework(job: Job) -> bool:
 
 
 def _build(ctx: Context) -> str | None:
+    parts = design.plan_parts(ctx.store.approved_plan_text(ctx.load()))
+    if not parts.whole_plan:
+        return _build_tasks(ctx, parts)
+    ctx.report("the plan has no '### T<n>: <title>' tasks; building it in one run")
+    return _build_whole_plan(ctx)
+
+
+def _build_whole_plan(ctx: Context) -> str | None:
     job = ctx.load()
     task = build_task(
         ctx.store,
@@ -334,6 +351,7 @@ def _build(ctx: Context) -> str | None:
         **ctx.budgets(),
         feedback=feedback_for(ctx.store, job),
         model=ctx.options.builder_model,
+        check_timeout_seconds=ctx.config.check_timeout,
     )
     round_no = job.attempts.build + 1
     ctx.report(f"round {round_no}: building with {ctx.builder.name}")
@@ -353,16 +371,231 @@ def _build(ctx: Context) -> str | None:
     return "verify" if ctx.load().state is S.VERIFYING else None
 
 
+def _build_tasks(ctx: Context, parts: design.PlanParts) -> str | None:
+    """One round, task by task (ADR 0006 §2): each task is its own builder run, scope check,
+    commit and checks, retried with the failures up to ``MAX_TASK_ATTEMPTS`` times. A task that
+    still fails goes to a human; the tasks before it stay committed."""
+    store = ctx.store
+    job = ctx.load()
+    round_no = job.attempts.build + 1
+    todo = round_tasks(store, job, parts)
+    done = [t.id for t in parts.tasks if t not in todo]
+    # The generic "finish the job" note would mislead later tasks; only the resumed one gets it.
+    feedback = tuple(item for item in feedback_for(store, job) if item != INTERRUPTED_NOTE)
+    first = feedback
+    if job.state is S.INTERRUPTED and todo:
+        first = (_resume_note(ctx, todo[0].id), *feedback)
+    # Recorded before the round starts, so a kill can never leave a round without its tasks.
+    store.record_evidence(
+        ctx.job_id,
+        "task-round",
+        "planned",
+        {"round": round_no, "tasks": [t.id for t in todo], "done": done},
+        mocked=False,
+    )
+    start_build(store, ctx.held(), ctx.builder, _builder_task(ctx, parts.tasks[0].id, (), ()))
+    if done:
+        ctx.report(f"round {round_no}: building {', '.join(t.id for t in todo) or 'nothing'}; "
+                   f"done: {', '.join(done)}")  # fmt: skip
+    for index, plan_task in enumerate(todo):
+        retry: tuple[str, ...] = ()
+        for attempt in range(1, MAX_TASK_ATTEMPTS + 1):
+            given = first if index == 0 and attempt == 1 else feedback
+            task = _builder_task(ctx, plan_task.id, tuple(done), given + retry)
+            ctx.report(
+                f"round {round_no}: {plan_task.id} ({plan_task.title}) attempt {attempt}: "
+                f"building with {ctx.builder.name}"
+            )
+            message = (
+                f"forgeflow: {job.ref or job.job_id} {plan_task.id} round {round_no}\n\n"
+                f"{plan_task.title}\n\nBuilder: {ctx.builder.name}\nJob: {job.job_id}\n"
+                f"Task: {plan_task.id}\nPlan-sha256: {task.plan_sha256}\n"
+            )
+            try:
+                result = build_step(store, ctx.held(), ctx.builder, task, commit_message=message)
+            except ProviderError as exc:
+                if ctx.load().state is S.NEEDS_HUMAN:  # build_step escalated already
+                    ctx.report(f"needs a human: {plan_task.id}: builder failed: {exc}")
+                    return None
+                raise
+            ctx.report(f"{plan_task.id}: builder {result.status}: {result.summary[:200]}")
+            if ctx.load().state is not S.BUILDING:  # escalated: a failed run or refused change
+                return None
+            evidence = _task_checks(ctx, plan_task.id, attempt, result)
+            if evidence is None:
+                return None
+            if evidence.status == "passed":
+                break
+            retry = tuple(check_failures(store.evidence_payload(ctx.load(), evidence)))
+        else:
+            _escalate(
+                ctx,
+                f"task {plan_task.id} ({plan_task.title}) still fails its checks after "
+                f"{MAX_TASK_ATTEMPTS} attempts; the tasks before it stay committed",
+            )
+            return None
+        done.append(plan_task.id)
+    store.transition(ctx.job_id, S.VERIFYING, lease_token=ctx.token)
+    return "verify"
+
+
+def round_tasks(store: JobStore, job: Job, parts: design.PlanParts) -> list[design.PlanTask]:
+    """The plan tasks a new round builds, decided from the record (ADR 0006 §2).
+
+    Continuing (after an interruption, or a human's go-ahead on an escalated job): the tasks of
+    the latest ``task-round`` without a passing ``task-result`` since, so a kill or timeout costs
+    at most the task it hit. An interrupted round whose tasks all passed builds nothing more.
+    Rework (failed final checks, review findings, the owner's note): only the tasks the open
+    findings name, by id (``T2``) or by a file on the task's ``Files:`` line; all tasks when any
+    finding names none.
+    """
+    if job.state in (S.INTERRUPTED, S.READY):
+        unfinished = _unfinished(store, job, parts)
+        if unfinished or job.state is S.INTERRUPTED:
+            return unfinished
+    return _named_by_findings(store, job, parts)
+
+
+def _payload(store: JobStore, job: Job, evidence: Evidence) -> dict[str, Any]:
+    try:
+        return store.evidence_payload(job, evidence)
+    except EvidenceError:
+        return {}  # unreadable: the task counts as not done, the finding as naming no task
+
+
+def _unfinished(store: JobStore, job: Job, parts: design.PlanParts) -> list[design.PlanTask]:
+    # Only rounds that started count; a planned round BUILDING refused never ran.
+    rounds = [
+        p
+        for e in job.evidence
+        if e.kind == "task-round"
+        for p in [_payload(store, job, e)]
+        if p.get("round", job.attempts.build) <= job.attempts.build
+    ]
+    latest_round = rounds[-1] if rounds else {}
+    since = latest_round.get("round", job.attempts.build)  # unreadable: count no older pass
+    planned = latest_round.get("tasks", [t.id for t in parts.tasks])
+    passed = {
+        _payload(store, job, e).get("task")
+        for e in job.evidence
+        if e.kind == "task-result" and e.status == "passed" and e.build_round >= since
+    }
+    return [t for t in parts.tasks if t.id in planned and t.id not in passed]
+
+
+def _named_by_findings(store: JobStore, job: Job, parts: design.PlanParts) -> list[design.PlanTask]:
+    texts: list[str] = []
+    for evidence in job.evidence:
+        if evidence.build_round != job.attempts.build:
+            continue
+        payload = _payload(store, job, evidence)
+        if evidence.kind == "review" and evidence.status == "request-changes":
+            texts += [str(f) for f in payload.get("findings", [])] or [""]
+        elif evidence.kind == "human-feedback":
+            texts.append(str(payload.get("note", "")))
+        elif evidence.kind == "checks" and evidence.status == "failed":
+            texts.append("")  # the final checks name no task
+    named: set[str] = set()
+    for text in texts:
+        found = {t.id for t in parts.tasks if re.search(rf"\b{t.id}\b", text)}
+        file = _FINDING_FILE.match(text)
+        if file:
+            found |= {t.id for t in parts.tasks if file.group(1) in t.files}
+        if not found:
+            return list(parts.tasks)
+        named |= found
+    return [t for t in parts.tasks if t.id in named] or list(parts.tasks)
+
+
+def _resume_note(ctx: Context, task_id: str) -> str:
+    worktree = ctx.store.job_worktree(ctx.load())
+    dirty = bool(porcelain_status(worktree))
+    ctx.report(f"resuming at {task_id}" + (" with its partial work" if dirty else ""))
+    partial = (
+        "Its partial, uncommitted work is still in the worktree (see `git status`): review it "
+        f"and finish {task_id}."
+        if dirty
+        else "It left no uncommitted work."
+    )
+    return f"Your previous run of {task_id} was interrupted. {partial}"
+
+
+def _builder_task(
+    ctx: Context, task_id: str, done: tuple[str, ...], feedback: tuple[str, ...]
+) -> ProviderTask:
+    return build_task(
+        ctx.store,
+        ctx.job_id,
+        role="builder",
+        acceptance_criteria=ctx.criteria,
+        allowed_paths=ctx.config.allowed_paths,
+        protected_paths=ctx.config.protected_paths,
+        validation_commands=ctx.config.argv_list,
+        **ctx.budgets(),
+        feedback=feedback,
+        model=ctx.options.builder_model,
+        task_id=task_id,
+        done_tasks=done,
+        check_timeout_seconds=ctx.config.check_timeout,
+    )
+
+
+def _task_checks(
+    ctx: Context, task_id: str, attempt: int, result: ProviderResult
+) -> Evidence | None:
+    """Run the checks on the task's commit and record its ``task-result``; None if escalated."""
+    try:
+        evidence = ctx.store.run_task_checks(
+            ctx.job_id,
+            ctx.token,
+            ctx.config.argv_list,
+            task=task_id,
+            details={
+                "attempt": attempt,
+                "builder": {
+                    "status": result.status,
+                    "usage": result.to_dict()["usage"],
+                    "telemetry": result.telemetry,
+                },
+            },
+            mocked=result.mocked,
+            timeout=ctx.config.check_timeout,
+            names=ctx.config.names,
+            source=dict(ctx.config.source),
+        )
+    except InvalidTransitionError as exc:  # e.g. uncommitted changes appeared
+        _escalate(ctx, f"{task_id}: the checks could not run: {exc}")
+        return None
+    ctx.report(f"{task_id}: checks {evidence.status} on {(evidence.commit or '?')[:12]}")
+    return evidence
+
+
+def check_failures(payload: dict[str, Any]) -> list[str]:
+    """What a failed checks record tells the builder: each failing command's output tail."""
+    items: list[str] = []
+    for command in payload.get("commands", []):
+        if command.get("ok"):
+            continue
+        output = (command.get("stderr_tail") or "") + (command.get("stdout_tail") or "")
+        items.append(
+            f"Check {command.get('name') or ' '.join(command.get('argv', []))!r} failed "
+            f"(exit {command.get('returncode')}, timed out {command.get('timed_out')}). "
+            f"End of its output:\n{output[-_FEEDBACK_TAIL:]}"
+            if "error" not in command
+            else f"Check {command.get('name')!r} could not run: {command['error']}"
+        )
+    if not payload.get("worktree_unchanged", True):
+        items.append("The checks changed files or commits; checks must not modify the tree.")
+    return items
+
+
 def feedback_for(store: JobStore, job: Job) -> tuple[str, ...]:
     """What the previous round left to fix, rebuilt from the record (so resumes see it too)."""
     interrupted = job.state is S.INTERRUPTED
     previous = job.attempts.build - 1 if interrupted else job.attempts.build
     items: list[str] = []
     if interrupted:
-        items.append(
-            "Your previous run was interrupted. Its partial, uncommitted work is still in the "
-            "worktree: review it and finish the job."
-        )
+        items.append(INTERRUPTED_NOTE)
     for evidence in job.evidence:
         if evidence.build_round != previous:
             continue
@@ -375,21 +608,7 @@ def feedback_for(store: JobStore, job: Job) -> tuple[str, ...]:
             )
             continue
         if evidence.kind == "checks" and evidence.status == "failed":
-            for command in payload.get("commands", []):
-                if command.get("ok"):
-                    continue
-                output = (command.get("stderr_tail") or "") + (command.get("stdout_tail") or "")
-                items.append(
-                    f"Check {command.get('name') or ' '.join(command.get('argv', []))!r} failed "
-                    f"(exit {command.get('returncode')}, timed out {command.get('timed_out')}). "
-                    f"End of its output:\n{output[-_FEEDBACK_TAIL:]}"
-                    if "error" not in command
-                    else f"Check {command.get('name')!r} could not run: {command['error']}"
-                )
-            if not payload.get("worktree_unchanged", True):
-                items.append(
-                    "The checks changed files or commits; checks must not modify the tree."
-                )
+            items += check_failures(payload)
         elif evidence.kind == "review" and evidence.status == "request-changes":
             items += [f"Reviewer finding: {f}" for f in payload.get("findings", [])]
         elif evidence.kind == "human-feedback":

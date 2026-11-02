@@ -35,6 +35,30 @@ name = "greeting"
 argv = ["{{python}}", "-c", "{CHECK}"]
 """
 
+# A plan with two tasks: each is built, committed and checked on its own (ADR 0006 §2).
+TASK_PLAN = """# Add a greeting
+
+## Problem and objective
+
+Nobody is greeted.
+
+## Scope
+
+The greeting and a note.
+
+## Tasks
+
+### T1: Write the greeting
+
+- Files: greet.txt
+- [ ] greet.txt says hello
+
+### T2: Add a note
+
+- Files: notes.txt
+- [ ] notes.txt explains the greeting
+"""
+
 APPROVE: dict[str, Any] = {"verdict": "approve", "summary": "meets the plan", "findings": []}
 
 
@@ -69,9 +93,12 @@ class PipelineTestCase(GitRepoTestCase):
         )
         self.lines: list[str] = []
 
-    def handed_off_job(self) -> Job:
+    def handed_off_job(self, plan: str | None = None) -> Job:
+        """``plan`` replaces the fixture's one-paragraph plan (one without tasks) first."""
         from forgeflow.jobs import UNASSIGNED_PROVIDER
 
+        if plan is not None:
+            (self.repo / "docs" / "plan.md").write_text(plan, encoding="utf-8")
         job = self.approved_job(builder=UNASSIGNED_PROVIDER, reviewer=None)
         return handoff(self.store, job.job_id, self.client, self.binding).job
 

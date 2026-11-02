@@ -59,6 +59,12 @@ _H2 = re.compile(r"^## (?!#)(.+?)\s*$", re.MULTILINE)
 _TASK = re.compile(r"^### (T\d+)\s*[:.\-—]\s*(.+?)\s*$", re.MULTILINE)
 _H3 = re.compile(r"^### ", re.MULTILINE)
 _CRITERION = re.compile(r"^\s*[-*] \[ \] \S", re.MULTILINE)
+# A criterion's text, continued on indented lines that do not start another bullet.
+_CRITERION_TEXT = re.compile(
+    r"^\s*[-*] \[[ xX]\] (.+(?:\n(?![ \t]*[-*] )[ \t]+\S.*)*)", re.MULTILINE
+)
+# What every task's builder sees besides its own task (ADR 0006 §1).
+FRAME_SECTIONS = ("Problem and objective", "Requirements", "Scope")
 # "- **Files:** `a.py`, `b.py`" or "Files: a.py, b.py", continued on indented lines.
 _FILES = re.compile(
     r"^\s*(?:[-*]\s+)?\*{0,2}Files:\*{0,2}(.*(?:\n(?![ \t]*[-*] )[ \t]+.*)*)", re.MULTILINE
@@ -78,6 +84,33 @@ class Task:
     title: str
     criteria: int
     files: int = 0  # entries on its Files: line; 0 when it has none
+
+
+@dataclass(frozen=True)
+class PlanTask:
+    """One ``### T<n>`` task as the builder sees it: its text in full and what it names."""
+
+    id: str
+    title: str
+    body: str  # heading included
+    criteria: tuple[str, ...]
+    files: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class PlanParts:
+    """A plan cut into what every task needs (the frame) and the tasks themselves."""
+
+    title: str
+    frame: tuple[str, ...]  # the objective, requirements and scope sections, headings included
+    tasks: tuple[PlanTask, ...]
+    whole_plan: bool  # no parseable task: the one task holds the whole plan
+
+    def task(self, task_id: str) -> PlanTask:
+        for task in self.tasks:
+            if task.id == task_id:
+                return task
+        raise ValidationError(f"the plan has no task {task_id}")
 
 
 @dataclass
@@ -133,15 +166,8 @@ def check_text(text: str) -> PlanCheck:
         if not any(k.startswith(_section_key(recommended)) for k in keys):
             result.warnings.append(f"no '## {recommended}' section (add it if relevant)")
 
-    tasks_body = ""
-    for i, (heading, _start, end) in enumerate(headings):
-        if _section_key(heading).startswith("tasks"):
-            stop = headings[i + 1][1] if i + 1 < len(headings) else len(text)
-            tasks_body = text[end:stop]
-    starts = [m.start() for m in _H3.finditer(tasks_body)]
     seen: set[str] = set()
-    for n, pos in enumerate(starts):
-        chunk = tasks_body[pos : starts[n + 1] if n + 1 < len(starts) else len(tasks_body)]
+    for chunk in _task_chunks(text):
         match = _TASK.match(chunk)
         if not match:
             first = chunk.splitlines()[0]
@@ -200,16 +226,73 @@ def check_text(text: str) -> PlanCheck:
     return result
 
 
-def _files(chunk: str) -> int | None:
-    """How many files a task's Files: line names: backticked paths or comma-separated entries,
-    whichever is more. ``None`` when it has no such line or the line names nothing."""
+def _sections(text: str) -> list[tuple[str, str]]:
+    """Every ``##`` section as (heading, its text from the heading to the next one)."""
+    heads = list(_H2.finditer(text))
+    ends = [m.start() for m in heads[1:]] + [len(text)]
+    return [(m.group(1), text[m.start() : end]) for m, end in zip(heads, ends, strict=False)]
+
+
+def _task_chunks(text: str) -> list[str]:
+    """The ``###`` blocks of the (last) ``## Tasks`` section, each up to the next ``###``."""
+    body = ""
+    for heading, section in _sections(text):
+        if _section_key(heading).startswith("tasks"):
+            body = section.split("\n", 1)[1] if "\n" in section else ""
+    starts = [m.start() for m in _H3.finditer(body)]
+    ends = starts[1:] + [len(body)]
+    return [body[start:end] for start, end in zip(starts, ends, strict=False)]
+
+
+def _file_list(chunk: str) -> tuple[str, ...] | None:
+    """The files a task's Files: line names: per comma-separated entry its backticked paths,
+    or the entry itself. ``None`` when it has no such line or the line names nothing."""
     match = _FILES.search(chunk)
     if match is None:
         return None
-    listed = match.group(1)
-    quoted = len(_BACKTICKED.findall(listed))
-    entries = len([p for p in listed.split(",") if p.strip()])
-    return max(quoted, entries) or None
+    names: list[str] = []
+    for entry in match.group(1).split(","):
+        quoted = [q.strip("`") for q in _BACKTICKED.findall(entry)]
+        names += quoted or ([entry.strip()] if entry.strip() else [])
+    return tuple(names) or None
+
+
+def _files(chunk: str) -> int | None:
+    found = _file_list(chunk)
+    return len(found) if found else None
+
+
+def _criteria(text: str) -> tuple[str, ...]:
+    found = (" ".join(m.split()) for m in _CRITERION_TEXT.findall(text))
+    return tuple(dict.fromkeys(found))
+
+
+def plan_parts(text: str) -> PlanParts:
+    """Cut an approved plan into its frame and its tasks (ADR 0006 §1). Pure.
+
+    A plan without any ``### T<n>: <title>`` task under ``## Tasks`` (older plans) yields one
+    task holding the whole plan, with ``whole_plan`` set.
+    """
+    titles = _H1.findall(text)
+    title = titles[0].strip() if titles else ""
+    frame_keys = [_section_key(name) for name in FRAME_SECTIONS]
+    frame = tuple(
+        section.strip()
+        for heading, section in _sections(text)
+        if any(_section_key(heading).startswith(key) for key in frame_keys)
+    )
+    tasks = []
+    for chunk in _task_chunks(text):
+        match = _TASK.match(chunk)
+        if match:
+            criteria = _criteria(chunk)
+            files = _file_list(chunk) or ()
+            tasks.append(PlanTask(match.group(1), match.group(2), chunk.strip(), criteria, files))
+    if tasks:
+        return PlanParts(title, frame, tuple(tasks), whole_plan=False)
+    criteria = _criteria(text)
+    whole = PlanTask("T1", title or "the plan", text.strip(), criteria, ())
+    return PlanParts(title, frame, (whole,), whole_plan=True)
 
 
 def _bullets(items: list[str], placeholder: str) -> str:

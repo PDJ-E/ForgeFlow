@@ -8,6 +8,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+- **Harness v2b: task-scoped builds** ([ADR 0006](docs/decisions/0006-task-scoped-execution-harness.md)).
+  A plan with `### T<n>` tasks is built one task per builder run. Each task is scope-checked,
+  committed by ForgeFlow (`forgeflow: J<n> T<k> round <r>`) and checked; it runs up to 3 times
+  while its checks fail. The final commit is verified, reviewed and delivered as before.
+  `resume` continues at the first unfinished task; rework rebuilds only the tasks the findings
+  name. Plans without tasks are built in one run, as before.
+- The Claude builder can run the configured checks itself: Bash under `--permission-mode
+  dontAsk` with one exact `--allowedTools` rule per check plus `git status`/`git diff`.
+  `doctor` lists them. This bounds intent, not capability; ForgeFlow's scope check, its own
+  commit and check run, review and Gate B are unchanged.
+- `.claude/*`, `.agents/*`, `CLAUDE.md` and `AGENTS.md` are protected paths by default.
 - Centralize evidence validation in JobStore and report unreadable feedback explicitly.
   Delivery now stops before pushing when evidence cannot be read.
 - Remove the unused issue-linking adapter; issue ownership uses the canonical store operation.

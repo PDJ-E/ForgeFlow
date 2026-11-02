@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import unittest
 
 from forgeflow import design, discovery, pipeline
 from forgeflow.errors import InvalidTransitionError, ValidationError
@@ -153,6 +154,54 @@ class PlanCheckTests(GitRepoTestCase):
         self.assertTrue(result.ok)
         self.assertTrue(any("Proposed solution" in w for w in result.warnings))
         self.assertTrue(any("local user path" in w for w in result.warnings))
+
+
+class PlanPartsTests(unittest.TestCase):
+    def test_tasks_and_frame_are_cut_from_the_plan(self) -> None:
+        parts = design.plan_parts(VALID_PLAN)
+        self.assertFalse(parts.whole_plan)
+        self.assertEqual(parts.title, "Greeting on start-up")
+        self.assertEqual([t.id for t in parts.tasks], ["T1", "T2"])
+        first, second = parts.tasks
+        self.assertEqual(first.title, "Add greet()")
+        self.assertTrue(first.body.startswith("### T1: Add greet()\n\nChange main.py."))
+        self.assertNotIn("T2", first.body)
+        self.assertEqual(first.criteria, ("greet() prints hello", "main() calls greet()"))
+        self.assertEqual(first.files, ("main.py", "tests/test_main.py"))
+        self.assertEqual(second.files, ("README.md",))
+        self.assertEqual(second.body, "### T2: Document it\n\n- Files: README.md\n"
+                         "- [ ] README mentions the greeting")  # fmt: skip
+        self.assertEqual(
+            [section.splitlines()[0] for section in parts.frame],
+            ["## Problem and objective", "## Requirements", "## Scope"],
+        )
+        self.assertIn("Users are not greeted.", parts.frame[0])
+        self.assertNotIn("Proposed solution", "".join(parts.frame))
+        self.assertIs(parts.task("T2"), second)
+        with self.assertRaisesRegex(ValidationError, "no task T3"):
+            parts.task("T3")
+
+    def test_file_names_and_wrapped_criteria_are_read_whole(self) -> None:
+        plan = VALID_PLAN.replace(
+            "- **Files:** `main.py`,\n  `tests/test_main.py`",
+            "- **Files:** `main.py` (new), `tests/test_main.py`, docs/x.md\n"
+            "- [ ] a criterion that wraps\n  onto a second line\n  - [ ] nested",
+        )
+        (first, _) = design.plan_parts(plan).tasks
+        self.assertEqual(first.files, ("main.py", "tests/test_main.py", "docs/x.md"))
+        self.assertEqual(
+            first.criteria[:2], ("a criterion that wraps onto a second line", "nested")
+        )
+
+    def test_a_plan_without_parseable_tasks_is_one_task(self) -> None:
+        for text in ("# Plan\n\nAdd a greeting.\n", VALID_PLAN.replace("### T", "### Step ")):
+            with self.subTest(text=text[:30]):
+                parts = design.plan_parts(text)
+                self.assertTrue(parts.whole_plan)
+                (task,) = parts.tasks
+                self.assertEqual(task.body, text.strip())
+                self.assertEqual(task.id, "T1")
+        self.assertEqual(design.plan_parts("# Plan\n\nAdd a greeting.\n").tasks[0].title, "Plan")
 
 
 class ProjectNumberWarningTests(GitRepoTestCase):
