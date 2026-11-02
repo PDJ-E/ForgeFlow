@@ -11,6 +11,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Centralize evidence validation in JobStore and report unreadable feedback explicitly.
   Delivery now stops before pushing when evidence cannot be read.
 - Remove the unused issue-linking adapter; issue ownership uses the canonical store operation.
+- `forgeflow status <job>` lists the approved plan's tasks with their criteria and file counts.
 
 ### Fixed
 

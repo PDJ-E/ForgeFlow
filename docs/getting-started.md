@@ -43,6 +43,8 @@ py -3.13 -m forgeflow status          # local jobs (read-only)
 py -3.13 -m forgeflow status <job-id> # one job, with recent events
 ```
 
+For a job with an approved plan, `status <job-id>` also lists the plan's tasks, one line each with id, title and the number of criteria and files. Jobs without an approved plan show no task lines.
+
 `doctor` prints the interpreter it ran under (`python ... (C:\...\python.exe)`). To inspect another repository: `py -3.13 -m forgeflow --repo C:\path\to\repo doctor`.
 
 A `forgeflow` console command is optional. If you want one, install the checkout for that interpreter yourself, for example `py -3.13 -m pip install --user -e C:\Dev\ForgeFlow`. ForgeFlow never installs itself.
