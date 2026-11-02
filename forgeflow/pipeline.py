@@ -351,6 +351,7 @@ def _build_whole_plan(ctx: Context) -> str | None:
         **ctx.budgets(),
         feedback=feedback_for(ctx.store, job),
         model=ctx.options.builder_model,
+        check_timeout_seconds=ctx.config.check_timeout,
     )
     round_no = job.attempts.build + 1
     ctx.report(f"round {round_no}: building with {ctx.builder.name}")
@@ -535,6 +536,7 @@ def _builder_task(
         model=ctx.options.builder_model,
         task_id=task_id,
         done_tasks=done,
+        check_timeout_seconds=ctx.config.check_timeout,
     )
 
 

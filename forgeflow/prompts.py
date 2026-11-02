@@ -81,7 +81,8 @@ ForgeFlow runs these checks on the committed result; make them pass:
 
 Run them yourself while you work: after each change the narrowest of them that covers it, and \
 all of them before you finish. Write each exactly as shown; your shell may refuse any other \
-command except `git status` and `git diff`. ForgeFlow still runs them itself afterwards.
+command except `git status` and `git diff`. ForgeFlow still runs them itself afterwards. A \
+check such as the full test suite can take minutes: let it finish rather than stopping it.
 """
 
 

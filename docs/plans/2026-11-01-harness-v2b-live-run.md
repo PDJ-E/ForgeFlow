@@ -3,9 +3,9 @@
 - **For:** [`2026-11-01-harness-v2b.md`](2026-11-01-harness-v2b.md) T5; ADR 0006 becomes
   `Accepted` only after this run, with its record.
 - **Status:** prepared. No job exists yet. Nothing below has been run.
-- **Needs the owner:** authorisation to create the job; Gate A (`forgeflow approve`, the owner
-  at the console), which also publishes the GitHub issue and Project card; the authorisation
-  to `run`; and Gate B (the owner merges or closes the draft PR).
+- **Needs the owner:** authorisation to create the sibling clone and the job; Gate A
+  (`forgeflow approve`, the owner at the console), which also publishes the GitHub issue and
+  Project card; the authorisation to `run`; and Gate B (the owner merges or closes the PR).
 
 ## Why this job
 
@@ -15,9 +15,26 @@ with disjoint `Files:`, so the run shows two builder invocations, two task commi
 (`forgeflow: J<n> T1 round 1`, `… T2 round 1`), two `task-result` records, then the final
 checks, the review and a draft PR. The builder's shell runs this repository's four checks.
 
+## Where it runs: a separate clone
+
+Not from this checkout. Its runtime holds J5, which is `needs_human`; that state occupies the
+single execution slot (`SLOT_STATES` in `forgeflow/jobs.py`), so a new job here would be refused
+on its way to READY ("already occupies the execution slot"). J5 is not touched and no `cancel`
+is added (that is J6). A sibling clone has its own `.forge/runtime/` and therefore its own slot.
+
 ## Steps (owner-authorised)
 
 ```powershell
+# 1. A sibling clone on the v2b branch, bound to the same Project
+cd "..\"
+git clone https://github.com/PDJ-E/ForgeFlow.git ForgeFlow-live
+cd ForgeFlow-live
+git switch feat/harness-v2b
+git log -1 --format='%h %s'                  # must be the PR's head (T5b or later), not 26d732b
+py -3.13 -m forgeflow doctor --offline       # builder-shell lists this clone's checks
+py -3.13 -m forgeflow init --project 2       # binds this clone's runtime to Project 2
+
+# 2. The job, all in the clone
 py -3.13 -m forgeflow idea new "Show the approved plan's tasks in forgeflow status"
 py -3.13 -m forgeflow design new J<n>        # then replace plan.md with the plan below
 py -3.13 -m forgeflow design check J<n>
@@ -28,14 +45,19 @@ py -3.13 -m forgeflow status J<n> --json     # all evidence, including task-roun
 git log --format='%h %s' origin/main..forge/<job-id>   # the per-task commits
 ```
 
+The clone runs ForgeFlow from `feat/harness-v2b`; the job's worktree is still cut from
+`origin/main`, and its checks come from `origin/main`'s `.forge/forgeflow.toml` (900 s per
+check, so the builder's Bash gets 900 s too, T5b). The job's `J<n>` is local to the clone; the
+GitHub issue and PR are real. After Gate B the owner closes or merges the PR and archives the
+Project item; the clone can then be deleted.
+
 To record per task: commit, check results, turns, cost (API-equivalent) and duration, from
 the `task-result` and `provider-result` evidence and the stream files under the job's
 `evidence/`.
 
-Watch for: this repository's only test command is the full suite (~4 min), longer than the
-Claude Code Bash tool's default 2-minute timeout, so the builder must raise the tool's timeout
-to run it (the stream shows whether it did). Each task's checks also take ~4 min, the docs-only
-T2 included.
+Watch for: whether the builder's own full-suite runs (~4 min) finish under the 900 s Bash limit
+(T5b), visible in the stream. Each task's checks also take ~4 min, the docs-only T2 included
+(follow-up in the plan's "Next").
 
 ## The plan
 

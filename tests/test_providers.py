@@ -353,6 +353,22 @@ class ExecutionTests(unittest.TestCase):
         self.assertNotIn("--allowedTools", reviewer)
         self.assertNotIn("Bash", " ".join(reviewer))
 
+    def test_the_claude_builders_shell_gets_the_checks_time_limit_and_nobody_else(self) -> None:
+        clean = {k: v for k, v in os.environ.items() if not k.startswith("BASH_")}
+        with mock.patch.dict(os.environ, clean, clear=True):
+            builder = self.cli("claude", {"writes": {"src/a.py": "x\n"}})
+            self.execute(ClaudeCodeProvider(command=builder), self.task(check_timeout_seconds=900))
+            self.assertEqual(self.log(builder)[0]["bash_timeouts"], ["900000", "900000"])
+            unset = self.cli("claude", {"writes": {"src/a.py": "x\n"}})
+            self.execute(ClaudeCodeProvider(command=unset), self.task())
+            self.assertEqual(self.log(unset)[0]["bash_timeouts"], [None, None])
+            review = self.cli("claude", {"review": {"verdict": "approve", "summary": "ok",
+                                                    "findings": []}})  # fmt: skip
+            task = self.task(role="reviewer", allowed_operations=("read",),
+                             review_commit="a" * 40, check_timeout_seconds=900)  # fmt: skip
+            self.execute(ClaudeCodeProvider(command=review), task)
+            self.assertEqual(self.log(review)[0]["bash_timeouts"], [None, None])
+
     def test_claude_stream_is_written_incrementally_redacted_and_bounded(self) -> None:
         stream = self.dir / "evidence" / "stream-builder.jsonl"
         leaky = "https://x-access-token:ghs_SECRET1@github.com/o/r sk-ant-api03-SECRET2"

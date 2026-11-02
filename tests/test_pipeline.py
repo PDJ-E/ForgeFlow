@@ -11,6 +11,7 @@ in test_delivery with real commits and checks.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import tomllib
@@ -270,6 +271,11 @@ class TaskRoundTests(PipelineTestCase):
         self.assertIn("- T1: Write the greeting [current]\n- T2: Add a note [pending]", first)
         self.assertIn("- T1: Write the greeting [done]\n- T2: Add a note [current]", second)
         self.assertNotIn("notes.txt explains", first)
+        # The builder's shell gets the configured check timeout (120 s in CONFIG).
+        self.assertEqual({tuple(s["bash_timeouts"]) for s in self.starts(builder)},
+                         {("120000", "120000")})  # fmt: skip
+        inherited = [os.environ.get(v) for v in ("BASH_DEFAULT_TIMEOUT_MS", "BASH_MAX_TIMEOUT_MS")]
+        self.assertEqual(self.starts(reviewer)[0]["bash_timeouts"], inherited)  # none added
         self.assertEqual(len(self.starts(reviewer)), 1)
         self.assertEqual(job.state, S.NEEDS_HUMAN)  # simulated: never delivered
         self.assertEqual(self.world.pulls, {})
@@ -409,6 +415,7 @@ class TaskRoundTests(PipelineTestCase):
         self.assertIn("the plan has no '### T<n>: <title>' tasks", " ".join(self.lines))
         self.assertNotIn("task-result", [e.kind for e in job.evidence])
         self.assertNotIn("[current]", self.starts(builder)[0]["prompt"])
+        self.assertEqual(self.starts(builder)[0]["bash_timeouts"], ["120000", "120000"])
 
     def test_task_results_come_only_from_checks_run_in_a_build_round(self) -> None:
         job = self.ready_job()

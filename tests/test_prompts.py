@@ -75,6 +75,7 @@ class BuilderPromptTests(unittest.TestCase):
             self.assertIn("all of them before you finish", prompt)
             self.assertIn("except `git status` and `git diff`", prompt)
             self.assertIn("ForgeFlow still runs them itself afterwards", prompt)
+            self.assertIn("can take minutes", prompt)
 
     def test_without_a_task_the_prompt_carries_the_whole_plan(self) -> None:
         prompt = prompts.builder_prompt(task_for(VALID_PLAN))

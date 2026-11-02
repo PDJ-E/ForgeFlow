@@ -126,6 +126,8 @@ class ProviderTask:
     # builder: the plan task this run implements ("" = the whole plan) and those already done
     task_id: str = ""
     done_tasks: tuple[str, ...] = ()
+    # builder: the configured per-check timeout, also given to Claude's Bash tool (ADR 0006 §3)
+    check_timeout_seconds: int | None = None
 
     def validate(self) -> None:
         if self.role not in ROLES:
@@ -451,6 +453,16 @@ def builder_commands(checks: Sequence[Sequence[str]]) -> tuple[str, ...]:
     return (*(shlex.join(argv) for argv in checks), *BUILDER_GIT_COMMANDS)
 
 
+def builder_env(task: ProviderTask) -> dict[str, str]:
+    """Claude's Bash tool stops a command after 2 minutes by default; a builder's checks get the
+    time ForgeFlow gives them (``BASH_DEFAULT_TIMEOUT_MS``/``BASH_MAX_TIMEOUT_MS``, Claude Code's
+    environment-variable reference)."""
+    if task.role != "builder" or not task.check_timeout_seconds:
+        return {}
+    ms = str(task.check_timeout_seconds * 1000)
+    return {"BASH_DEFAULT_TIMEOUT_MS": ms, "BASH_MAX_TIMEOUT_MS": ms}
+
+
 class ClaudeCodeProvider(_CliProvider):
     name = "claude"
     executable_name = "claude"
@@ -566,7 +578,14 @@ class ClaudeCodeProvider(_CliProvider):
             else prompts.reviewer_prompt(task)
         )
         with _StreamLog(task.stream_path) as stream:
-            result = self._run(task, lease, self.argv(task), prompt, on_stdout_line=stream.write)
+            result = self._run(
+                task,
+                lease,
+                self.argv(task),
+                prompt,
+                env=builder_env(task) or None,
+                on_stdout_line=stream.write,
+            )
         events = _jsonl(result.stdout)
         telemetry = _claude_telemetry(events, task.stream_path)
         if result.timed_out:
@@ -1097,6 +1116,7 @@ def build_task(
     max_budget_usd: float | None = None,
     task_id: str = "",
     done_tasks: tuple[str, ...] = (),
+    check_timeout_seconds: int | None = None,
 ) -> ProviderTask:
     """Derive a task from the job record so the approved plan and worktree cannot drift."""
     job = store.load(job_id)
@@ -1129,6 +1149,7 @@ def build_task(
         max_budget_usd=max_budget_usd,
         task_id=task_id,
         done_tasks=done_tasks,
+        check_timeout_seconds=check_timeout_seconds,
         stream_path=str(
             store.job_dir(job_id)
             / "evidence"
