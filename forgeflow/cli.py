@@ -363,6 +363,20 @@ def _latest_evidence_lines(job: Job, store: JobStore | None) -> list[str]:
     return lines
 
 
+def _plan_task_lines(job: Job, store: JobStore | None) -> list[str]:
+    """The approved plan's tasks, read from its verified snapshot (read-only). Nothing when the
+    job has no approved plan; ``unavailable`` when the snapshot cannot be read."""
+    if store is None or job.plan.approval is None or job.plan.approval.gate != "plan":
+        return []
+    try:
+        tasks = design.check_text(store.approved_plan_text(job)).tasks
+    except (ForgeFlowError, OSError, UnicodeDecodeError) as exc:
+        return [f"  plan tasks     unavailable ({exc})"]
+    lines = [f"  plan tasks     {len(tasks)}"]
+    lines += [f"    {t.id}: {t.title} ({t.criteria} criteria, {t.files} files)" for t in tasks]
+    return lines
+
+
 def _format_job(job: Job, recent: list[dict[str, object]], store: JobStore | None = None) -> str:
     gh = job.github
     approval = job.plan.approval
@@ -381,6 +395,7 @@ def _format_job(job: Job, recent: list[dict[str, object]], store: JobStore | Non
             if approval
             else "none"
         ),
+        *_plan_task_lines(job, store),
         "  handoff        "
         + (
             (

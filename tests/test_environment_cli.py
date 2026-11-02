@@ -143,6 +143,53 @@ class CliTests(GitRepoTestCase):
         self.assertEqual(json.loads(out)["job"]["state"], "ready")
         self.assertEqual(self.store.load(job.job_id).revision, revision)
 
+    def _write_tasked_plan(self) -> None:
+        (self.repo / "docs" / "plan.md").write_text(
+            "# Plan\n\n## Tasks\n\n"
+            "### T1: Add the greeting\n\n"
+            "- **Files:** `greet.py`, `tests/test_greet.py`\n"
+            "- [ ] it greets\n- [ ] it is tested\n\n"
+            "### T2: Document it\n\n"
+            "- **Files:** `README.md`\n"
+            "- [ ] the README says so\n",
+            encoding="utf-8",
+        )
+
+    def test_status_lists_the_approved_plans_tasks(self) -> None:
+        self._write_tasked_plan()
+        job = self.approved_job()
+        revision = self.store.load(job.job_id).revision
+        code, out, _ = self.run_cli("status", job.job_id)
+        self.assertEqual(code, 0)
+        self.assertIn("  plan tasks     2\n", out)
+        self.assertIn("    T1: Add the greeting (2 criteria, 2 files)", out)
+        self.assertIn("    T2: Document it (1 criteria, 1 files)", out)
+        self.assertEqual(self.store.load(job.job_id).revision, revision)
+
+    def test_status_of_a_draft_job_has_no_task_lines(self) -> None:
+        self._write_tasked_plan()
+        job = self.new_job()
+        job = self.store.submit_plan(job.job_id, "docs/plan.md")
+        revision = self.store.load(job.job_id).revision
+        code, out, _ = self.run_cli("status", job.job_id)
+        self.assertEqual(code, 0)
+        self.assertIn("plan approval  none", out)
+        self.assertNotIn("plan tasks", out)
+        self.assertEqual(self.store.load(job.job_id).revision, revision)
+
+    def test_status_reports_an_unreadable_plan_snapshot_as_unavailable(self) -> None:
+        self._write_tasked_plan()
+        job = self.approved_job()
+        revision = self.store.load(job.job_id).revision
+        for snapshot in (self.store.job_dir(job.job_id) / "plans").iterdir():
+            snapshot.write_text("# Tampered\n", encoding="utf-8")
+        code, out, _ = self.run_cli("status", job.job_id)
+        self.assertEqual(code, 0)
+        self.assertIn("plan approval  v1 by", out)
+        self.assertRegex(out, r"plan tasks     unavailable \(.*modified")
+        self.assertNotIn("T1: Add the greeting", out)
+        self.assertEqual(self.store.load(job.job_id).revision, revision)
+
     def test_status_works_from_inside_a_job_worktree(self) -> None:
         job = self.ready_job()
         assert job.worktree is not None
